@@ -1,0 +1,49 @@
+/**
+ * Configuration for Suban Controller (Data Oracle)
+ */
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+export const config = {
+  // Server
+  port: parseInt(process.env.PORT || '3000', 10),
+  nodeEnv: process.env.NODE_ENV || 'development',
+  logLevel: process.env.LOG_LEVEL || 'info',
+
+  // Cache
+  cacheTTL: parseInt(process.env.CACHE_TTL_SECONDS || '10', 10),
+
+  // Horizon API URLs (our own nodes)
+  horizon: {
+    mainnet: process.env.HORIZON_MAINNET_URL || 'http://localhost:41401',
+    testnet: process.env.HORIZON_TESTNET_URL || 'http://localhost:31401',
+  },
+
+  // Active network (mainnet or testnet)
+  network: (process.env.NETWORK || 'mainnet') as 'mainnet' | 'testnet',
+
+  // Pi Symbols (configured for each exchange source)
+  symbols: {
+    coingecko: process.env.PI_SYMBOL_COINGECKO || 'pi-network',
+    okx: process.env.PI_SYMBOL_OKX || 'PI-USDT',
+    bitget: process.env.PI_SYMBOL_BITGET || 'PIUSDT',
+    mexc: process.env.PI_SYMBOL_MEXC || 'PIUSDT',
+  },
+
+  // Aggregation
+  outlierThresholdPercent: parseInt(process.env.OUTLIER_THRESHOLD_PERCENT || '10', 10),
+  minSourcesRequired: parseInt(process.env.MIN_SOURCES_REQUIRED || '1', 10),
+
+  // Source Weights (for weighted average calculation)
+  weights: {
+    coingecko: parseFloat(process.env.WEIGHT_COINGECKO || '1.5'),
+    okx: parseFloat(process.env.WEIGHT_OKX || '2.0'),
+    bitget: parseFloat(process.env.WEIGHT_BITGET || '2.0'),
+    mexc: parseFloat(process.env.WEIGHT_MEXC || '3.0'),
+  },
+
+  // On-chain data cache TTL (longer than price cache)
+  chainDataCacheTTL: parseInt(process.env.CHAIN_DATA_CACHE_TTL || '30', 10),
+};
+
