@@ -1,6 +1,7 @@
 /**
  * Price aggregation service
  * Combines prices from multiple sources using weighted averages
+ * with staleness checks, circuit breakers, and deviation alerts.
  */
 import { PriceSource, PriceData, AggregatedPrice, SourcePriceDetail, PriceOracleError } from '../types';
 import { logger } from '../utils/logger';
@@ -9,13 +10,69 @@ import { cacheService } from './cache';
 
 export class PriceAggregator {
   private sources: PriceSource[] = [];
+  private lastCommittedPrice: number | null = null;
+  private circuitBreakerTriggeredAt: number | null = null;
+  private deviationAlerts: Array<{ timestamp: Date; deviation_bps: number; old_price: number; new_price: number }> = [];
 
   addSource(source: PriceSource): void {
     this.sources.push(source);
     logger.info('Price source added', { source: source.getName() });
   }
 
+  /**
+   * Check if circuit breaker is currently active.
+   */
+  isCircuitBreakerActive(): boolean {
+    if (this.circuitBreakerTriggeredAt === null) return false;
+    const elapsed = Date.now() - this.circuitBreakerTriggeredAt;
+    if (elapsed > config.circuitBreakerPauseMs) {
+      // Pause expired, reset
+      this.circuitBreakerTriggeredAt = null;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Get the last committed price (before circuit breaker).
+   */
+  getLastCommittedPrice(): number | null {
+    return this.lastCommittedPrice;
+  }
+
+  /**
+   * Manually reset circuit breaker (admin action).
+   */
+  resetCircuitBreaker(): void {
+    this.circuitBreakerTriggeredAt = null;
+    logger.info('Circuit breaker manually reset');
+  }
+
+  /**
+   * Get recent deviation alerts.
+   */
+  getDeviationAlerts(limit: number = 50): Array<{ timestamp: Date; deviation_bps: number; old_price: number; new_price: number }> {
+    return this.deviationAlerts.slice(-limit);
+  }
+
   async getAggregatedPrice(): Promise<AggregatedPrice> {
+    // Check circuit breaker first
+    if (this.isCircuitBreakerActive()) {
+      logger.warn('Circuit breaker active, returning last committed price');
+      return {
+        symbol: 'PI',
+        price_usd: this.lastCommittedPrice ?? 0,
+        timestamp: new Date(),
+        sources_used: 0,
+        total_sources: this.sources.length,
+        aggregation_method: 'circuit_breaker_fallback',
+        source_prices: {},
+        confidence_score: 0,
+        cache_hit: false,
+        circuit_breaker_active: true,
+      };
+    }
+
     // Check cache first
     const cacheKey = 'aggregated_price';
     const cached = cacheService.get<AggregatedPrice>(cacheKey);
@@ -44,16 +101,81 @@ export class PriceAggregator {
 
     const result = this.calculateAggregatedPrice(filteredPrices, false);
     
+    // Circuit breaker check
+    if (this.lastCommittedPrice !== null) {
+      const deviationBps = Math.abs(result.price_usd - this.lastCommittedPrice) / this.lastCommittedPrice * 10000;
+
+      // Alert threshold
+      if (deviationBps > config.deviationAlertThresholdBps) {
+        const alert = {
+          timestamp: new Date(),
+          deviation_bps: deviationBps,
+          old_price: this.lastCommittedPrice,
+          new_price: result.price_usd,
+        };
+        this.deviationAlerts.push(alert);
+        if (this.deviationAlerts.length > 100) {
+          this.deviationAlerts = this.deviationAlerts.slice(-100);
+        }
+
+        logger.warn('Price deviation alert', {
+          deviation_bps: deviationBps,
+          old_price: this.lastCommittedPrice,
+          new_price: result.price_usd,
+          threshold_bps: config.deviationAlertThresholdBps,
+        });
+      }
+
+      // Circuit breaker threshold
+      if (deviationBps > config.circuitBreakerThresholdBps) {
+        this.circuitBreakerTriggeredAt = Date.now();
+        logger.error('CIRCUIT BREAKER TRIGGERED', {
+          deviation_bps: deviationBps,
+          old_price: this.lastCommittedPrice,
+          new_price: result.price_usd,
+          threshold_bps: config.circuitBreakerThresholdBps,
+          pause_ms: config.circuitBreakerPauseMs,
+        });
+        return {
+          ...result,
+          circuit_breaker_active: true,
+        };
+      }
+    }
+
     // Cache the result
     cacheService.set(cacheKey, result);
 
     return result;
   }
 
+  /**
+   * Commit the current price as the "last known" price.
+   * Call after a successful aggregation cycle.
+   */
+  commitPrice(price: number): void {
+    this.lastCommittedPrice = price;
+    logger.info('Price committed', { price });
+  }
+
   private async fetchAllPrices(): Promise<PriceData[]> {
+    const now = Date.now();
     const promises = this.sources.map(async (source) => {
       try {
-        return await source.fetchPrice();
+        const priceData = await source.fetchPrice();
+        
+        // Staleness check: exclude prices older than maxAgeMs
+        const priceAge = now - priceData.timestamp.getTime();
+        if (priceAge > config.sourceMaxAgeMs) {
+          logger.warn('Source price too stale, excluding', {
+            source: source.getName(),
+            age_ms: priceAge,
+            max_age_ms: config.sourceMaxAgeMs,
+          });
+          return null;
+        }
+
+        return priceData;
       } catch (error: any) {
         logger.warn('Failed to fetch from source', {
           source: source.getName(),
@@ -119,6 +241,7 @@ export class PriceAggregator {
         price: priceData.price,
         weight,
         timestamp: priceData.timestamp,
+        staleness_ms: priceData.staleness_ms,
       };
     }
 
@@ -132,7 +255,7 @@ export class PriceAggregator {
     const mean = prices.reduce((sum, p) => sum + p.price, 0) / prices.length;
     const variance = prices.reduce((sum, p) => sum + Math.pow(p.price - mean, 2), 0) / prices.length;
     const stdDev = Math.sqrt(variance);
-    const cv = stdDev / mean;
+    const cv = mean > 0 ? stdDev / mean : 0;
     
     // Lower CV means higher consistency
     const consistencyScore = Math.max(0, 1 - cv * 10);
@@ -163,4 +286,3 @@ export class PriceAggregator {
     return this.sources.map(source => source.getStatus());
   }
 }
-

@@ -16,6 +16,7 @@ import { CoinGeckoSource } from './sources/coingecko';
 import { OKXSource } from './sources/okx';
 import { BitgetSource } from './sources/bitget';
 import { MexcSource } from './sources/mexc';
+import { OraclePushService } from './services/oracle-push';
 
 async function main() {
   logger.info('Starting Suban Controller (Data Oracle)...');
@@ -69,6 +70,32 @@ async function main() {
     process.exit(1);
   }
 
+  // Initialize oracle push service
+  const oraclePush = new OraclePushService();
+  if (oraclePush.isConfigured()) {
+    logger.info('Oracle push service configured', {
+      contract_id: config.oracleContractId,
+    });
+
+    // Periodically push aggregated price to on-chain oracle
+    const pushInterval = setInterval(async () => {
+      try {
+        const price = await aggregator.getAggregatedPrice();
+        if (!price.cache_hit) {
+          aggregator.commitPrice(price.price_usd);
+          await oraclePush.pushPrice(price);
+        }
+      } catch (error: any) {
+        logger.warn('Periodic oracle push failed', { error: error.message });
+      }
+    }, config.cacheTTL * 1000);
+
+    // Don't keep process alive just for push interval
+    if (pushInterval.unref) {
+      pushInterval.unref();
+    }
+  }
+
   // API Routes
   app.use('/api/v1', createApiRouter(aggregator));
   
@@ -85,20 +112,29 @@ async function main() {
   app.get('/', (_req, res) => {
     res.json({
       name: 'Suban Controller',
-      version: '1.0.0',
+      version: '1.1.0',
       description: 'Data oracle for Pi Network - price feeds and on-chain analytics',
       platform: 'https://suban.org',
       endpoints: {
         price: '/api/v1/price',
         sources: '/api/v1/sources',
         health: '/api/v1/health',
+        circuitBreaker: '/api/v1/circuit-breaker',
+        deviationAlerts: '/api/v1/deviation-alerts',
+        oracleStats: '/api/v1/oracle/stats',
         chainStats: '/api/v1/chain/stats',
         ledgers: '/api/v1/chain/ledgers',
         accounts: '/api/v1/chain/accounts',
         transactions: '/api/v1/chain/transactions',
         horizon: '/horizon/*',
       },
+      oracle: oraclePush.getStats(),
     });
+  });
+
+  // Oracle push stats endpoint
+  app.get('/api/v1/oracle/stats', (_req, res) => {
+    res.json(oraclePush.getStats());
   });
 
   // 404 handler

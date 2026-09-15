@@ -45,5 +45,23 @@ export const config = {
 
   // On-chain data cache TTL (longer than price cache)
   chainDataCacheTTL: parseInt(process.env.CHAIN_DATA_CACHE_TTL || '30', 10),
+
+  // Staleness: max age of a price source before it's excluded (ms)
+  sourceMaxAgeMs: parseInt(process.env.SOURCE_MAX_AGE_MS || '30000', 10),
+
+  // Circuit breaker: max deviation in bps from last committed price before pause
+  circuitBreakerThresholdBps: parseInt(process.env.CIRCUIT_BREAKER_THRESHOLD_BPS || '500', 10),
+
+  // Circuit breaker: auto-pause duration after trigger (ms)
+  circuitBreakerPauseMs: parseInt(process.env.CIRCUIT_BREAKER_PAUSE_MS || '60000', 10),
+
+  // Deviation alert threshold in bps (logs alert but doesn't pause)
+  deviationAlertThresholdBps: parseInt(process.env.DEVIATION_ALERT_THRESHOLD_BPS || '300', 10),
+
+  // On-chain Oracle
+  oracleContractId: process.env.ORACLE_CONTRACT_ID || '',
+  oracleRpcUrl: process.env.ORACLE_RPC_URL || 'https://rpc.testnet.minepi.com',
+  oracleNetworkPassphrase: process.env.ORACLE_NETWORK_PASSPHRASE || 'Pi Testnet',
+  oracleAdminSecret: process.env.ORACLE_ADMIN_SECRET || '',
 };
 
