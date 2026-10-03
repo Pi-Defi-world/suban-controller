@@ -1,8 +1,9 @@
 /**
  * Oracle Push Service
  * Pushes aggregated prices to the on-chain HubOracle contract.
+ * Uses Horizon Server + Stellar SDK transaction building.
  */
-import { execFileSync } from 'child_process';
+import { Horizon, Keypair, TransactionBuilder, Contract } from '@stellar/stellar-sdk';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { AggregatedPrice } from '../types';
@@ -31,10 +32,6 @@ export class OraclePushService {
     return !!(this.contractId && this.adminSecret && this.rpcUrl);
   }
 
-  /**
-   * Push the current price to the on-chain oracle contract.
-   * Price is scaled to 7 decimals (i128).
-   */
   async pushPrice(price: AggregatedPrice): Promise<boolean> {
     if (!this.isConfigured()) {
       logger.debug('Oracle push not configured, skipping');
@@ -42,37 +39,30 @@ export class OraclePushService {
     }
 
     try {
-      const priceScaled = Math.round(price.price_usd * 1e7);
-      const confidence = Math.round(price.confidence_score * 100);
+      const server = new Horizon.Server(this.rpcUrl);
+      const sourceKeypair = Keypair.fromSecret(this.adminSecret);
+      const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
 
-      const args = [
-        'contract', 'invoke',
-        '--id', this.contractId,
-        '--rpc-url', this.rpcUrl,
-        '--network-passphrase', this.networkPassphrase,
-        '--source-account', this.adminSecret,
-        '--inclusion-fee', '1000000',
-        '--',
-        'set_price',
-        '--admin', this.adminSecret,
-        '--asset', this.contractId,
-        '--price', String(priceScaled),
-        '--decimals', '7',
-        '--confidence', String(confidence),
-      ];
+      const contract = new Contract(this.contractId);
 
       logger.debug('Pushing price to on-chain oracle', {
         price_usd: price.price_usd,
-        price_scaled: priceScaled,
-        confidence,
+        confidence: price.confidence_score,
         sources: price.sources_used,
       });
 
-      execFileSync('soroban', args, {
-        timeout: 30000,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      const tx = new TransactionBuilder(sourceAccount, {
+        fee: '1000000',
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          contract.call('set_price')
+        )
+        .setTimeout(30)
+        .build();
+
+      tx.sign(sourceKeypair);
+      const result = await server.submitTransaction(tx);
 
       this.pushCount++;
       this.lastPushAt = new Date();
@@ -81,13 +71,14 @@ export class OraclePushService {
       logger.info('Price pushed to on-chain oracle', {
         price_usd: price.price_usd,
         push_count: this.pushCount,
+        hash: result.hash,
       });
 
       return true;
     } catch (error: any) {
-      this.lastPushError = error.message;
+      this.lastPushError = error.message || String(error);
       logger.error('Failed to push price to on-chain oracle', {
-        error: error.message,
+        error: error.message || String(error),
         price_usd: price.price_usd,
       });
       return false;

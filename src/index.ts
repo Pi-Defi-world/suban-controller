@@ -10,6 +10,10 @@ import { createApiRouter } from './routes/api';
 import { createPiDataRouter } from './routes/pi-data';
 import { createHorizonProxyRouter } from './routes/horizon-proxy';
 import { createChainDataRouter } from './routes/chaindata';
+import { createRealtimeRouter } from './routes/realtime';
+import { TransactionStreamer } from './services/transactionStreamer';
+import { escrowRouter } from './routes/escrow';
+import { contractsRouter } from './routes/contracts';
 
 // Import all price sources
 import { CoinGeckoSource } from './sources/coingecko';
@@ -17,6 +21,7 @@ import { OKXSource } from './sources/okx';
 import { BitgetSource } from './sources/bitget';
 import { MexcSource } from './sources/mexc';
 import { OraclePushService } from './services/oracle-push';
+import { ArcSource } from './sources/arc';
 
 async function main() {
   logger.info('Starting Suban Controller (Data Oracle)...');
@@ -64,7 +69,15 @@ async function main() {
     );
     logger.info('Bitget source added');
 
-    logger.info('All 4 price sources initialized (MEXC, CoinGecko, OKX, Bitget)');
+    // Arc source (optional - only if configured)
+    if (config.arcRpcUrl) {
+      aggregator.addSource(
+        new ArcSource('arc', config.arcWeight, 'PI/USDC', config.arcRpcUrl, config.arcPricePairAddress)
+      );
+      logger.info('Arc source added', { rpc: config.arcRpcUrl });
+    }
+
+    logger.info('All price sources initialized (MEXC, CoinGecko, OKX, Bitget, Arc)');
   } catch (error: any) {
     logger.error('Error initializing price sources', { error: error.message });
     process.exit(1);
@@ -108,6 +121,17 @@ async function main() {
   // Horizon API proxy (to our local Horizon node)
   app.use('/horizon', createHorizonProxyRouter());
 
+  // SSE Realtime - live transaction/trade/order streaming
+  const streamer = new TransactionStreamer();
+  streamer.start();
+  app.use('/realtime', createRealtimeRouter(streamer));
+
+  // Escrow API - backend for escrow viewer
+  app.use('/api', escrowRouter);
+
+  // Contract search - derived from recent effects (no contract index in Horizon)
+  app.use('/api', contractsRouter);
+
   // Root endpoint
   app.get('/', (_req, res) => {
     res.json({
@@ -125,8 +149,12 @@ async function main() {
         chainStats: '/api/v1/chain/stats',
         ledgers: '/api/v1/chain/ledgers',
         accounts: '/api/v1/chain/accounts',
-        transactions: '/api/v1/chain/transactions',
+        chainTransactions: '/api/v1/chain/transactions',
         horizon: '/horizon/*',
+        realtime: '/realtime',
+        realtimeSnapshot: '/realtime/snapshot',
+        escrow: '/api/escrow/:id',
+        gatewayEvents: '/api/gateway/events',
       },
       oracle: oraclePush.getStats(),
     });

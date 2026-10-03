@@ -63,5 +63,10 @@ export const config = {
   oracleRpcUrl: process.env.ORACLE_RPC_URL || 'https://rpc.testnet.minepi.com',
   oracleNetworkPassphrase: process.env.ORACLE_NETWORK_PASSPHRASE || 'Pi Testnet',
   oracleAdminSecret: process.env.ORACLE_ADMIN_SECRET || '',
+
+  // Arc chain (EVM-compatible L1 by Circle)
+  arcRpcUrl: process.env.ARC_RPC_URL || '',
+  arcPricePairAddress: process.env.ARC_PRICE_PAIR_ADDRESS || '',
+  arcWeight: parseFloat(process.env.WEIGHT_ARC || '1.5'),
 };
 
