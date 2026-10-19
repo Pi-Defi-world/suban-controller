@@ -4,6 +4,7 @@
 import { Router, Request, Response } from 'express';
 import { PriceAggregator } from '../services/aggregator';
 import { logger } from '../utils/logger';
+import { controlRateLimit, requireControlAuth } from '../middleware/auth';
 
 const router = Router();
 const startTime = Date.now();
@@ -30,20 +31,26 @@ export function createApiRouter(aggregator: PriceAggregator): Router {
    * POST /api/v1/price/commit
    * Commit the current aggregated price (called after successful push to on-chain oracle)
    */
-  router.post('/price/commit', async (req: Request, res: Response) => {
-    try {
-      const { price } = req.body;
-      if (typeof price !== 'number' || price <= 0) {
-        res.status(400).json({ error: 'Invalid price' });
-        return;
+  router.post(
+    '/price/commit',
+    controlRateLimit,
+    requireControlAuth,
+    async (req: Request, res: Response) => {
+      try {
+        const { price } = req.body;
+        if (typeof price !== 'number' || price <= 0) {
+          res.status(400).json({ error: 'Invalid price' });
+          return;
+        }
+        aggregator.commitPrice(price);
+        logger.info('Price committed via control API', { price });
+        res.json({ committed: true, price });
+      } catch (error: any) {
+        logger.error('Error committing price', { error: error.message });
+        res.status(500).json({ error: 'Failed to commit price' });
       }
-      aggregator.commitPrice(price);
-      res.json({ committed: true, price });
-    } catch (error: any) {
-      logger.error('Error committing price', { error: error.message });
-      res.status(500).json({ error: 'Failed to commit price' });
     }
-  });
+  );
 
   /**
    * GET /api/v1/sources
@@ -108,10 +115,16 @@ export function createApiRouter(aggregator: PriceAggregator): Router {
    * POST /api/v1/circuit-breaker/reset
    * Manually reset circuit breaker (admin action)
    */
-  router.post('/circuit-breaker/reset', (_req: Request, res: Response) => {
-    aggregator.resetCircuitBreaker();
-    res.json({ reset: true });
-  });
+  router.post(
+    '/circuit-breaker/reset',
+    controlRateLimit,
+    requireControlAuth,
+    (_req: Request, res: Response) => {
+      aggregator.resetCircuitBreaker();
+      logger.warn('Circuit breaker reset via control API');
+      res.json({ reset: true });
+    }
+  );
 
   /**
    * GET /api/v1/deviation-alerts

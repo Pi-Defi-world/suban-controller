@@ -63,6 +63,17 @@ export const config = {
   oracleRpcUrl: process.env.ORACLE_RPC_URL || 'https://rpc.testnet.minepi.com',
   oracleNetworkPassphrase: process.env.ORACLE_NETWORK_PASSPHRASE || 'Pi Testnet',
   oracleAdminSecret: process.env.ORACLE_ADMIN_SECRET || '',
+  // Asset identifier (Soroban contract/account address) the oracle price is published under.
+  oracleAsset: process.env.ORACLE_ASSET || '',
+  // Fixed-point decimals used for the on-chain price. PUSD uses 7.
+  oraclePriceDecimals: parseInt(process.env.ORACLE_PRICE_DECIMALS || '7', 10),
+  // Explicit switch: publishing must be opted into.
+  oraclePushEnabled: (process.env.ORACLE_PUSH_ENABLED || 'false').toLowerCase() === 'true',
+  oraclePushIntervalMs: parseInt(process.env.ORACLE_PUSH_INTERVAL_MS || '60000', 10),
+
+  // Control-plane authentication. Required for price commit / breaker reset.
+  controlApiKey: process.env.CONTROLLER_ADMIN_API_KEY || '',
+  controlRateLimitPerMinute: parseInt(process.env.CONTROLLER_CONTROL_RATE_LIMIT || '30', 10),
 
   // Arc chain (EVM-compatible L1 by Circle)
   arcRpcUrl: process.env.ARC_RPC_URL || '',

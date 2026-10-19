@@ -88,6 +88,7 @@ async function main() {
   if (oraclePush.isConfigured()) {
     logger.info('Oracle push service configured', {
       contract_id: config.oracleContractId,
+      asset: config.oracleAsset,
     });
 
     // Periodically push aggregated price to on-chain oracle
@@ -101,7 +102,7 @@ async function main() {
       } catch (error: any) {
         logger.warn('Periodic oracle push failed', { error: error.message });
       }
-    }, config.cacheTTL * 1000);
+    }, config.oraclePushIntervalMs);
 
     // Don't keep process alive just for push interval
     if (pushInterval.unref) {
