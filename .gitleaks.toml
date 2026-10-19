@@ -1,0 +1,14 @@
+title = "Suban controller secret scanning"
+
+[extend]
+useDefault = true
+
+# Generated files and templates never contain real secrets.
+[[allowlists]]
+description = "Generated files, lockfiles and templates"
+paths = [
+  '''package-lock\.json''',
+  '''pnpm-lock\.yaml''',
+  '''yarn\.lock''',
+  '''.*\.example''',
+]
