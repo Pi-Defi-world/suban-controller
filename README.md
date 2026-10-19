@@ -62,6 +62,15 @@ pnpm start
 | `HORIZON_TESTNET_URL`        | `http://localhost:31401`         | Local Horizon testnet URL        |
 | `CACHE_TTL_SECONDS`          | `10`                             | Price cache TTL                  |
 | `CHAIN_DATA_CACHE_TTL`       | `30`                             | On-chain data cache TTL          |
+| `CONTROLLER_ADMIN_API_KEY`   | *(unset)*                        | Shared secret for control routes. **Required**; if unset, control routes return `503`. |
+| `CONTROLLER_CONTROL_RATE_LIMIT` | `30`                          | Control requests allowed per IP per minute |
+| `ORACLE_PUSH_ENABLED`        | `false`                          | Opt in to publishing prices on-chain |
+| `ORACLE_CONTRACT_ID`         | *(unset)*                        | Soroban oracle contract ID       |
+| `ORACLE_ASSET`               | *(unset)*                        | Asset address the price is published under |
+| `ORACLE_RPC_URL`             | `https://rpc.testnet.minepi.com` | Soroban RPC endpoint             |
+| `ORACLE_ADMIN_SECRET`        | *(unset)*                        | Stellar secret key for the oracle admin |
+| `ORACLE_PRICE_DECIMALS`      | `7`                              | Fixed-point decimals for the on-chain price |
+| `ORACLE_PUSH_INTERVAL_MS`    | `60000`                          | How often to attempt a price push |
 
 ## API Endpoints
 
@@ -85,6 +94,18 @@ pnpm start
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/horizon/*` | ALL | Proxy to local Horizon |
+
+### Control plane (authenticated)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/price/commit` | POST | Commit the current aggregated price |
+| `/api/v1/circuit-breaker/reset` | POST | Reset the price circuit breaker |
+
+These routes require a shared secret and are rate-limited per IP. Send it as
+`x-api-key: <key>` or `Authorization: Bearer <key>`. If
+`CONTROLLER_ADMIN_API_KEY` is not set, both routes return `503` rather than
+falling open. Never expose these routes on a public interface without the key;
+generate one with `openssl rand -hex 32`.
 
 ## Docker
 
