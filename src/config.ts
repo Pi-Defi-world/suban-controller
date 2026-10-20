@@ -75,6 +75,15 @@ export const config = {
   controlApiKey: process.env.CONTROLLER_ADMIN_API_KEY || '',
   controlRateLimitPerMinute: parseInt(process.env.CONTROLLER_CONTROL_RATE_LIMIT || '30', 10),
 
+  // Price persistence (SQLite). Use :memory: in tests.
+  priceDbPath: process.env.PRICE_DB_PATH || './data/prices.db',
+  priceRetentionDays: parseInt(process.env.PRICE_RETENTION_DAYS || '30', 10),
+
+  // Trust state thresholds
+  trustDegradedConfidence: parseFloat(process.env.TRUST_DEGRADED_CONFIDENCE || '0.5'),
+  trustMinSourceRatio: parseFloat(process.env.TRUST_MIN_SOURCE_RATIO || '0.5'),
+  trustRecoveryStreak: parseInt(process.env.TRUST_RECOVERY_STREAK || '3', 10),
+
   // Arc chain (EVM-compatible L1 by Circle)
   arcRpcUrl: process.env.ARC_RPC_URL || '',
   arcPricePairAddress: process.env.ARC_PRICE_PAIR_ADDRESS || '',

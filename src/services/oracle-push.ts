@@ -18,6 +18,7 @@ import {
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { AggregatedPrice } from '../types';
+import { oraclePushCounter } from './metrics';
 
 const TX_POLL_INTERVAL_MS = 1_000;
 const TX_TIMEOUT_MS = 30_000;
@@ -65,6 +66,16 @@ export class OraclePushService {
   async pushPrice(price: AggregatedPrice): Promise<boolean> {
     if (!this.isConfigured()) {
       logger.debug('Oracle push not configured or disabled, skipping');
+      oraclePushCounter.inc({ result: 'skipped' });
+      return false;
+    }
+
+    if (price.trust && price.trust.state !== 'HEALTHY') {
+      logger.warn('Skipping oracle push: trust state is not HEALTHY', {
+        trust_state: price.trust.state,
+        reason: price.trust.reason,
+      });
+      oraclePushCounter.inc({ result: 'untrusted' });
       return false;
     }
 
@@ -76,9 +87,10 @@ export class OraclePushService {
       const sourceAccount = await server.getAccount(sourceKeypair.publicKey());
 
       const scaledPrice = this.scalePrice(price.price_usd);
+      // The contract stores confidence on a 0-100 scale.
       const confidence = Math.max(
         0,
-        Math.min(100, Math.round(price.confidence_score))
+        Math.min(100, Math.round(price.confidence_score * 100))
       );
 
       logger.debug('Pushing price to on-chain oracle', {
@@ -128,6 +140,7 @@ export class OraclePushService {
       this.pushCount++;
       this.lastPushAt = new Date();
       this.lastPushError = null;
+      oraclePushCounter.inc({ result: 'success' });
 
       logger.info('Price pushed to on-chain oracle', {
         price_usd: price.price_usd,
@@ -138,6 +151,7 @@ export class OraclePushService {
       return true;
     } catch (error: any) {
       this.lastPushError = error.message || String(error);
+      oraclePushCounter.inc({ result: 'failure' });
       logger.error('Failed to push price to on-chain oracle', {
         error: this.lastPushError,
         price_usd: price.price_usd,

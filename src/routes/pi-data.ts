@@ -3,7 +3,7 @@
  */
 import { Router, Request, Response } from 'express';
 import { PriceAggregator } from '../services/aggregator';
-import { get24hStats, recordPrice } from '../services/priceHistory';
+import { getPriceStore } from '../services/priceStore';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import axios from 'axios';
@@ -24,10 +24,8 @@ export function createPiDataRouter(aggregator: PriceAggregator): Router {
       const priceData = await aggregator.getAggregatedPrice();
       const price = priceData.price_usd;
 
-      // Record price for 24h stats
-      recordPrice(price, 'aggregated');
-
-      const stats = get24hStats();
+      // Observations are persisted by the aggregator on fresh aggregation.
+      const stats = getPriceStore().getStats();
       const priceStr = price.toFixed(4);
 
       res.json({

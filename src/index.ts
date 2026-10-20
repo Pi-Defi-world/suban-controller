@@ -22,6 +22,8 @@ import { BitgetSource } from './sources/bitget';
 import { MexcSource } from './sources/mexc';
 import { OraclePushService } from './services/oracle-push';
 import { ArcSource } from './sources/arc';
+import { metricsRegistry, httpMetrics } from './services/metrics';
+import { closePriceStore, getPriceStore } from './services/priceStore';
 
 async function main() {
   logger.info('Starting Suban Controller (Data Oracle)...');
@@ -42,6 +44,16 @@ async function main() {
       ip: req.ip,
     });
     next();
+  });
+
+  // Prometheus request metrics
+  app.use(httpMetrics);
+
+  // Initialize price history store eagerly so a bad path fails at startup.
+  getPriceStore();
+  logger.info('Price history store ready', {
+    path: config.priceDbPath,
+    retention_days: config.priceRetentionDays,
   });
 
   // Initialize price aggregator
@@ -95,9 +107,11 @@ async function main() {
     const pushInterval = setInterval(async () => {
       try {
         const price = await aggregator.getAggregatedPrice();
-        if (!price.cache_hit) {
-          aggregator.commitPrice(price.price_usd);
-          await oraclePush.pushPrice(price);
+        if (!price.cache_hit && price.trust.state === 'HEALTHY') {
+          const pushed = await oraclePush.pushPrice(price);
+          if (pushed) {
+            aggregator.commitPrice(price.price_usd);
+          }
         }
       } catch (error: any) {
         logger.warn('Periodic oracle push failed', { error: error.message });
@@ -137,13 +151,16 @@ async function main() {
   app.get('/', (_req, res) => {
     res.json({
       name: 'Suban Controller',
-      version: '1.1.0',
+      version: '1.2.0',
       description: 'Data oracle for Pi Network - price feeds and on-chain analytics',
       platform: 'https://suban.org',
       endpoints: {
         price: '/api/v1/price',
+        history: '/api/v1/history',
+        trust: '/api/v1/trust',
         sources: '/api/v1/sources',
         health: '/api/v1/health',
+        metrics: '/metrics',
         circuitBreaker: '/api/v1/circuit-breaker',
         deviationAlerts: '/api/v1/deviation-alerts',
         oracleStats: '/api/v1/oracle/stats',
@@ -164,6 +181,12 @@ async function main() {
   // Oracle push stats endpoint
   app.get('/api/v1/oracle/stats', (_req, res) => {
     res.json(oraclePush.getStats());
+  });
+
+  // Prometheus metrics
+  app.get('/metrics', async (_req, res) => {
+    res.setHeader('Content-Type', metricsRegistry.contentType);
+    res.send(await metricsRegistry.metrics());
   });
 
   // 404 handler
@@ -195,6 +218,7 @@ async function main() {
   const shutdown = () => {
     logger.info('Shutting down gracefully');
     server.close(() => {
+      closePriceStore();
       logger.info('Server closed');
       process.exit(0);
     });

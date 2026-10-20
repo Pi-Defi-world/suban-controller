@@ -1,6 +1,12 @@
 /**
  * Type definitions for the Pi Price Oracle
  */
+import type { TrustSnapshot } from '../services/trustState';
+
+/** Version of the public price response schema. Bump on breaking changes. */
+export const PRICE_SCHEMA_VERSION = '1.0';
+/** Version of the aggregation methodology. Bump when the formula changes. */
+export const PRICE_METHOD_VERSION = 'weighted_average_v1';
 
 export interface PriceData {
   price: number;
@@ -12,15 +18,25 @@ export interface PriceData {
 }
 
 export interface AggregatedPrice {
+  /** Public response schema version. */
+  schema_version: string;
+  /** Aggregation methodology version. */
+  method_version: string;
   symbol: string;
   price_usd: number;
   timestamp: Date;
+  /** Age of this observation in milliseconds. */
+  age_ms: number;
+  /** True when age_ms is within the configured source freshness window. */
+  is_fresh: boolean;
   sources_used: number;
   total_sources: number;
   aggregation_method: string;
   source_prices: Record<string, SourcePriceDetail>;
   confidence_score: number;
   cache_hit: boolean;
+  /** Explicit trust state for this observation. */
+  trust: TrustSnapshot;
   /** Set to true if circuit breaker was triggered and price is from last committed */
   circuit_breaker_active?: boolean;
 }
@@ -29,6 +45,10 @@ export interface SourcePriceDetail {
   price: number;
   weight: number;
   timestamp: Date;
+  /** Age of this source price in milliseconds at aggregation time. */
+  age_ms: number;
+  /** True when age_ms is within the configured source freshness window. */
+  is_fresh: boolean;
   staleness_ms?: number;
 }
 

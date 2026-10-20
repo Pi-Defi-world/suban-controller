@@ -35,6 +35,9 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Local price history database
+data/
+
 # Temporary files
 *.tmp
 .cache/
