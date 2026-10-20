@@ -48,6 +48,10 @@ interface BuildResultParams {
 }
 
 interface PriceAggregatorOptions {
+  /** Asset symbol stored with observations and exposed in responses. */
+  symbol?: string;
+  /** Minimum sources for this asset. Defaults to the global setting. */
+  minSourcesRequired?: number;
   /** Override persistence (tests use an in-memory recorder). */
   store?: PriceRecorder;
   /** Override the trust machine (tests use a fake clock). */
@@ -60,10 +64,14 @@ export class PriceAggregator {
   private circuitBreakerTriggeredAt: number | null = null;
   private deviationAlerts: Array<{ timestamp: Date; deviation_bps: number; old_price: number; new_price: number }> = [];
 
+  private readonly symbol: string;
+  private readonly minSourcesRequired: number;
   private readonly store: PriceRecorder;
   private readonly trust: TrustStateMachine;
 
   constructor(options: PriceAggregatorOptions = {}) {
+    this.symbol = options.symbol ?? 'PI';
+    this.minSourcesRequired = options.minSourcesRequired ?? config.minSourcesRequired;
     this.store = options.store ?? {
       record: (observation) => getPriceStore().record(observation),
     };
@@ -134,6 +142,13 @@ export class PriceAggregator {
   async getAggregatedPrice(): Promise<AggregatedPrice> {
     // Check circuit breaker first
     if (this.isCircuitBreakerActive()) {
+      if (this.lastCommittedPrice === null) {
+        logger.warn('Circuit breaker active with no committed price');
+        aggregationCounter.inc({ asset: this.symbol, result: 'circuit_breaker' });
+        throw new PriceOracleError(
+          'Circuit breaker active and no previously committed price is available'
+        );
+      }
       logger.warn('Circuit breaker active, returning last committed price');
       const trust = this.evaluateTrust({
         sourcesUsed: 0,
@@ -142,9 +157,9 @@ export class PriceAggregator {
         minSourcesMet: false,
         circuitBreakerActive: true,
       });
-      aggregationCounter.inc({ result: 'circuit_breaker' });
+      aggregationCounter.inc({ asset: this.symbol, result: 'circuit_breaker' });
       return this.buildResult({
-        price: this.lastCommittedPrice ?? 0,
+        price: this.lastCommittedPrice,
         sourcesUsed: 0,
         totalSources: this.sources.length,
         aggregationMethod: 'circuit_breaker_fallback',
@@ -157,7 +172,7 @@ export class PriceAggregator {
     }
 
     // Check cache first
-    const cacheKey = 'aggregated_price';
+    const cacheKey = `aggregated_price:${this.symbol}`;
     const cached = cacheService.get<AggregatedPrice>(cacheKey);
 
     if (cached) {
@@ -167,11 +182,11 @@ export class PriceAggregator {
         sourcesUsed: cached.sources_used,
         totalSources: cached.total_sources,
         confidence: cached.confidence_score,
-        minSourcesMet: cached.sources_used >= config.minSourcesRequired,
+        minSourcesMet: cached.sources_used >= this.minSourcesRequired,
         circuitBreakerActive: false,
       });
 
-      aggregationCounter.inc({ result: 'cache_hit' });
+      aggregationCounter.inc({ asset: this.symbol, result: 'cache_hit' });
       priceAgeGauge.set({ symbol: cached.symbol }, ageMs);
       this.updateSourceMetrics();
 
@@ -188,7 +203,7 @@ export class PriceAggregator {
     const prices = await this.fetchAllPrices();
     this.updateSourceMetrics();
 
-    if (prices.length < config.minSourcesRequired) {
+    if (prices.length < this.minSourcesRequired) {
       this.evaluateTrust({
         sourcesUsed: prices.length,
         totalSources: this.sources.length,
@@ -196,15 +211,15 @@ export class PriceAggregator {
         minSourcesMet: false,
         circuitBreakerActive: false,
       });
-      aggregationCounter.inc({ result: 'insufficient_sources' });
+      aggregationCounter.inc({ asset: this.symbol, result: 'insufficient_sources' });
       throw new PriceOracleError(
-        `Insufficient data sources (${prices.length}/${config.minSourcesRequired} required)`
+        `Insufficient data sources (${prices.length}/${this.minSourcesRequired} required)`
       );
     }
 
     // Remove outliers
     let aggregationPrices = this.removeOutliers(prices);
-    if (aggregationPrices.length < config.minSourcesRequired) {
+    if (aggregationPrices.length < this.minSourcesRequired) {
       logger.warn('Too many outliers detected, using all prices');
       // Fall back to all prices if too many were filtered
       aggregationPrices = prices;
@@ -256,7 +271,7 @@ export class PriceAggregator {
           minSourcesMet: true,
           circuitBreakerActive: true,
         });
-        aggregationCounter.inc({ result: 'circuit_breaker_triggered' });
+        aggregationCounter.inc({ asset: this.symbol, result: 'circuit_breaker_triggered' });
 
         const breakerResult = this.buildResult({
           price: aggregate.price,
@@ -279,7 +294,7 @@ export class PriceAggregator {
       sourcesUsed: aggregationPrices.length,
       totalSources: this.sources.length,
       confidence: aggregate.confidence,
-      minSourcesMet: aggregationPrices.length >= config.minSourcesRequired,
+      minSourcesMet: aggregationPrices.length >= this.minSourcesRequired,
       circuitBreakerActive: false,
     });
 
@@ -294,7 +309,7 @@ export class PriceAggregator {
       isFresh: true,
     });
 
-    aggregationCounter.inc({ result: 'success' });
+    aggregationCounter.inc({ asset: this.symbol, result: 'success' });
     cacheService.set(cacheKey, result);
     this.recordObservation(result);
     this.updatePriceMetrics(result);
@@ -441,7 +456,7 @@ export class PriceAggregator {
     circuitBreakerActive: boolean;
   }): TrustSnapshot {
     const trust = this.trust.evaluate(input);
-    setTrustState(trust.state);
+    setTrustState(this.symbol, trust.state);
     return trust;
   }
 
@@ -449,7 +464,7 @@ export class PriceAggregator {
     return {
       schema_version: PRICE_SCHEMA_VERSION,
       method_version: PRICE_METHOD_VERSION,
-      symbol: 'PI',
+      symbol: this.symbol,
       price_usd: params.price,
       timestamp: new Date(),
       age_ms: params.ageMs ?? 0,
@@ -491,8 +506,8 @@ export class PriceAggregator {
 
   private updateSourceMetrics(): void {
     for (const status of this.getAllSourceStatuses()) {
-      sourceUpGauge.set({ source: status.name }, status.status === 'active' ? 1 : 0);
-      sourceStalenessGauge.set({ source: status.name }, Math.max(0, status.staleness_ms));
+      sourceUpGauge.set({ asset: this.symbol, source: status.name }, status.status === 'active' ? 1 : 0);
+      sourceStalenessGauge.set({ asset: this.symbol, source: status.name }, Math.max(0, status.staleness_ms));
     }
   }
 

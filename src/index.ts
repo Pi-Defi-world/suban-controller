@@ -5,7 +5,6 @@ import express from 'express';
 import cors from 'cors';
 import { config } from './config';
 import { logger } from './utils/logger';
-import { PriceAggregator } from './services/aggregator';
 import { createApiRouter } from './routes/api';
 import { createPiDataRouter } from './routes/pi-data';
 import { createHorizonProxyRouter } from './routes/horizon-proxy';
@@ -15,15 +14,11 @@ import { TransactionStreamer } from './services/transactionStreamer';
 import { escrowRouter } from './routes/escrow';
 import { contractsRouter } from './routes/contracts';
 
-// Import all price sources
-import { CoinGeckoSource } from './sources/coingecko';
-import { OKXSource } from './sources/okx';
-import { BitgetSource } from './sources/bitget';
-import { MexcSource } from './sources/mexc';
 import { OraclePushService } from './services/oracle-push';
-import { ArcSource } from './sources/arc';
 import { metricsRegistry, httpMetrics } from './services/metrics';
 import { closePriceStore, getPriceStore } from './services/priceStore';
+import { PriceService } from './services/priceService';
+import { buildAssetDefinitions } from './assets/registry';
 
 async function main() {
   logger.info('Starting Suban Controller (Data Oracle)...');
@@ -56,65 +51,45 @@ async function main() {
     retention_days: config.priceRetentionDays,
   });
 
-  // Initialize price aggregator
-  const aggregator = new PriceAggregator();
-
-  // Add all price sources
-  try {
-    aggregator.addSource(
-      new MexcSource('mexc', config.weights.mexc, config.symbols.mexc)
-    );
-    logger.info('MEXC source added');
-
-    aggregator.addSource(
-      new CoinGeckoSource('coingecko', config.weights.coingecko, config.symbols.coingecko)
-    );
-    logger.info('CoinGecko source added');
-
-    aggregator.addSource(
-      new OKXSource('okx', config.weights.okx, config.symbols.okx)
-    );
-    logger.info('OKX source added');
-
-    aggregator.addSource(
-      new BitgetSource('bitget', config.weights.bitget, config.symbols.bitget)
-    );
-    logger.info('Bitget source added');
-
-    // Arc source (optional - only if configured)
-    if (config.arcRpcUrl) {
-      aggregator.addSource(
-        new ArcSource('arc', config.arcWeight, 'PI/USDC', config.arcRpcUrl, config.arcPricePairAddress)
-      );
-      logger.info('Arc source added', { rpc: config.arcRpcUrl });
-    }
-
-    logger.info('All price sources initialized (MEXC, CoinGecko, OKX, Bitget, Arc)');
-  } catch (error: any) {
-    logger.error('Error initializing price sources', { error: error.message });
-    process.exit(1);
-  }
+  // Initialize the multi-asset price service. Each asset owns its sources,
+  // cache, circuit breaker and trust machine.
+  const priceService = new PriceService(buildAssetDefinitions());
+  const piAggregator = priceService.getDefaultAggregator();
+  logger.info('Price assets initialized', {
+    assets: priceService.getSummary(),
+  });
 
   // Initialize oracle push service
   const oraclePush = new OraclePushService();
-  if (oraclePush.isConfigured()) {
+  const oracleTargets = priceService.getOracleTargets();
+
+  if (oraclePush.isConfigured() && oracleTargets.length > 0) {
     logger.info('Oracle push service configured', {
       contract_id: config.oracleContractId,
-      asset: config.oracleAsset,
+      assets: oracleTargets.map((target) => target.asset.id),
     });
 
-    // Periodically push aggregated price to on-chain oracle
+    // Periodically push each healthy asset to its on-chain oracle entry.
     const pushInterval = setInterval(async () => {
-      try {
-        const price = await aggregator.getAggregatedPrice();
-        if (!price.cache_hit && price.trust.state === 'HEALTHY') {
-          const pushed = await oraclePush.pushPrice(price);
-          if (pushed) {
-            aggregator.commitPrice(price.price_usd);
+      for (const target of oracleTargets) {
+        try {
+          const price = await target.aggregator.getAggregatedPrice();
+          if (price.cache_hit || price.trust.state !== 'HEALTHY') {
+            continue;
           }
+          const pushed = await oraclePush.pushPrice(
+            price,
+            target.asset.oracleAsset
+          );
+          if (pushed) {
+            target.aggregator.commitPrice(price.price_usd);
+          }
+        } catch (error: any) {
+          logger.warn('Periodic oracle push failed', {
+            asset: target.asset.id,
+            error: error.message,
+          });
         }
-      } catch (error: any) {
-        logger.warn('Periodic oracle push failed', { error: error.message });
       }
     }, config.oraclePushIntervalMs);
 
@@ -122,13 +97,17 @@ async function main() {
     if (pushInterval.unref) {
       pushInterval.unref();
     }
+  } else if (oraclePush.isConfigured()) {
+    logger.warn(
+      'Oracle push enabled but no asset has an oracle address (set ORACLE_ASSET, ORACLE_ASSET_USDC, ...)'
+    );
   }
 
   // API Routes
-  app.use('/api/v1', createApiRouter(aggregator));
+  app.use('/api/v1', createApiRouter(priceService));
   
   // Pi Network data endpoints
-  app.use('/data', createPiDataRouter(aggregator));
+  app.use('/data', createPiDataRouter(piAggregator));
   
   // On-chain data endpoints (from our local Horizon)
   app.use('/api/v1/chain', createChainDataRouter());
@@ -151,14 +130,15 @@ async function main() {
   app.get('/', (_req, res) => {
     res.json({
       name: 'Suban Controller',
-      version: '1.2.0',
-      description: 'Data oracle for Pi Network - price feeds and on-chain analytics',
+      version: '1.3.0',
+      description: 'Data oracle for Pi Network - multi-asset price feeds and on-chain analytics',
       platform: 'https://suban.org',
       endpoints: {
-        price: '/api/v1/price',
-        history: '/api/v1/history',
-        trust: '/api/v1/trust',
-        sources: '/api/v1/sources',
+        assets: '/api/v1/assets',
+        price: '/api/v1/price?asset=PI',
+        history: '/api/v1/history?asset=PI',
+        trust: '/api/v1/trust?asset=PI',
+        sources: '/api/v1/sources?asset=PI',
         health: '/api/v1/health',
         metrics: '/metrics',
         circuitBreaker: '/api/v1/circuit-breaker',

@@ -25,7 +25,7 @@ const TX_TIMEOUT_MS = 30_000;
 
 export class OraclePushService {
   private contractId: string;
-  private asset: string;
+  private defaultAsset: string;
   private rpcUrl: string;
   private networkPassphrase: string;
   private adminSecret: string;
@@ -34,10 +34,11 @@ export class OraclePushService {
   private pushCount: number = 0;
   private lastPushAt: Date | null = null;
   private lastPushError: string | null = null;
+  private lastPushAsset: string | null = null;
 
   constructor() {
     this.contractId = config.oracleContractId;
-    this.asset = config.oracleAsset;
+    this.defaultAsset = config.oracleAsset;
     this.rpcUrl = config.oracleRpcUrl;
     this.networkPassphrase = config.oracleNetworkPassphrase;
     this.adminSecret = config.oracleAdminSecret;
@@ -48,7 +49,7 @@ export class OraclePushService {
       logger.info('Oracle push disabled (set ORACLE_PUSH_ENABLED=true to enable)');
     } else if (!this.isConfigured()) {
       logger.warn(
-        'Oracle push enabled but not configured — ORACLE_CONTRACT_ID, ORACLE_ASSET and ORACLE_ADMIN_SECRET are required'
+        'Oracle push enabled but not configured — ORACLE_CONTRACT_ID, ORACLE_RPC_URL and ORACLE_ADMIN_SECRET are required'
       );
     }
   }
@@ -57,25 +58,34 @@ export class OraclePushService {
     return !!(
       this.enabled &&
       this.contractId &&
-      this.asset &&
       this.adminSecret &&
       this.rpcUrl
     );
   }
 
-  async pushPrice(price: AggregatedPrice): Promise<boolean> {
+  async pushPrice(price: AggregatedPrice, assetAddress?: string): Promise<boolean> {
     if (!this.isConfigured()) {
       logger.debug('Oracle push not configured or disabled, skipping');
-      oraclePushCounter.inc({ result: 'skipped' });
+      oraclePushCounter.inc({ asset: price.symbol, result: 'skipped' });
+      return false;
+    }
+
+    const asset = assetAddress ?? this.defaultAsset;
+    if (!asset) {
+      logger.warn('Skipping oracle push: no asset address configured', {
+        asset: price.symbol,
+      });
+      oraclePushCounter.inc({ asset: price.symbol, result: 'unconfigured_asset' });
       return false;
     }
 
     if (price.trust && price.trust.state !== 'HEALTHY') {
       logger.warn('Skipping oracle push: trust state is not HEALTHY', {
+        asset: price.symbol,
         trust_state: price.trust.state,
         reason: price.trust.reason,
       });
-      oraclePushCounter.inc({ result: 'untrusted' });
+      oraclePushCounter.inc({ asset: price.symbol, result: 'untrusted' });
       return false;
     }
 
@@ -98,7 +108,7 @@ export class OraclePushService {
         scaled_price: scaledPrice.toString(),
         decimals: this.decimals,
         confidence,
-        asset: this.asset,
+        asset,
       });
 
       const contract = new Contract(this.contractId);
@@ -110,7 +120,7 @@ export class OraclePushService {
           contract.call(
             'set_price',
             new Address(sourceKeypair.publicKey()).toScVal(),
-            new Address(this.asset).toScVal(),
+            new Address(asset).toScVal(),
             nativeToScVal(scaledPrice, { type: 'i128' }),
             nativeToScVal(this.decimals, { type: 'u32' }),
             nativeToScVal(confidence, { type: 'u32' })
@@ -140,9 +150,11 @@ export class OraclePushService {
       this.pushCount++;
       this.lastPushAt = new Date();
       this.lastPushError = null;
-      oraclePushCounter.inc({ result: 'success' });
+      this.lastPushAsset = price.symbol;
+      oraclePushCounter.inc({ asset: price.symbol, result: 'success' });
 
       logger.info('Price pushed to on-chain oracle', {
+        asset: price.symbol,
         price_usd: price.price_usd,
         push_count: this.pushCount,
         hash,
@@ -151,8 +163,9 @@ export class OraclePushService {
       return true;
     } catch (error: any) {
       this.lastPushError = error.message || String(error);
-      oraclePushCounter.inc({ result: 'failure' });
+      oraclePushCounter.inc({ asset: price.symbol, result: 'failure' });
       logger.error('Failed to push price to on-chain oracle', {
+        asset: price.symbol,
         error: this.lastPushError,
         price_usd: price.price_usd,
       });
@@ -196,8 +209,9 @@ export class OraclePushService {
       push_count: this.pushCount,
       last_push_at: this.lastPushAt,
       last_push_error: this.lastPushError,
+      last_push_asset: this.lastPushAsset,
       contract_id: this.contractId || null,
-      asset: this.asset || null,
+      asset: this.defaultAsset || null,
       decimals: this.decimals,
     };
   }

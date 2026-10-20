@@ -1,32 +1,36 @@
 # Suban Controller
 
-Data oracle for Pi Network — aggregates price feeds from 4 exchanges and provides on-chain analytics from our local Horizon nodes.
+Data oracle for Pi Network — aggregates multi-asset price feeds and provides on-chain analytics from our local Horizon nodes.
 
 Part of the [Suban Data Platform](https://suban.org).
 
 ## Features
 
-- **Price Feeds**: Aggregates from MEXC, CoinGecko, OKX, and Bitget (no API keys required)
+- **Multi-Asset Price Feeds**: Independent PI/USD, USDC/USD, USDT/USD and oUSD/USD pipelines
+- **Price Sources**: MEXC, CoinGecko, OKX and Bitget for PI; CoinGecko/OKX/MEXC for stablecoins; configurable HTTP feed for oUSD
 - **On-chain Analytics**: Ledger stats, account data, transaction history from local Horizon
-- **Cost Effective**: All exchange sources are free — $0 operational cost
-- **Weighted Aggregation**: Smart price averaging with outlier detection and confidence scoring
-- **Fault Tolerant**: Continues operating even if some sources fail
+- **Cost Effective**: All default exchange sources are free — $0 operational cost
+- **Weighted Aggregation**: Smart price averaging with outlier detection and confidence scoring per asset
+- **Fault Tolerant**: Continues operating even if some sources fail; each asset has its own breaker
 - **Persistent History**: Price observations are stored in SQLite and survive restarts (30-day default retention)
-- **Explicit Trust States**: `HEALTHY` / `DEGRADED` / `BREAKER` / `RECOVERY` with transition history
-- **Observable**: Prometheus metrics at `/metrics` and provenance/freshness fields on every price
+- **Explicit Trust States**: `HEALTHY` / `DEGRADED` / `BREAKER` / `RECOVERY` per asset with transition history
+- **Observable**: Prometheus metrics at `/metrics` with per-asset labels and provenance/freshness fields on every price
 - **Horizon Proxy**: Transparent proxy to our local Horizon node
 - **Docker Ready**: Includes Dockerfile for containerized deployment
 
 ## Data Sources
 
-### Price Feeds (4 Active)
+### Price Feeds
 
-| Source    | Auth Required | Weight |
-|-----------|--------------|--------|
-| MEXC      | No           | 3.0x   |
-| CoinGecko | No           | 1.5x   |
-| OKX       | No           | 2.0x   |
-| Bitget    | No           | 2.0x   |
+| Asset | Sources | Notes |
+|-------|---------|-------|
+| `PI` | MEXC, CoinGecko, OKX, Bitget, optional Arc | Weighted 3.0x / 1.5x / 2.0x / 2.0x |
+| `USDC` | CoinGecko (`usd-coin`), OKX (`USDC-USDT`), MEXC (`USDCUSDT`) | Equal weights |
+| `USDT` | CoinGecko (`tether`), OKX (`USDT-USD`) | Equal weights |
+| `OUSD` | Configurable HTTP feed | Disabled until `OUSD_PRICE_URL` is set; no invented peg |
+
+Each asset has its own sources, cache, circuit breaker and trust state. The
+registry is exposed at `GET /api/v1/assets`.
 
 ### On-chain Data
 
@@ -69,7 +73,10 @@ pnpm start
 | `CONTROLLER_CONTROL_RATE_LIMIT` | `30`                          | Control requests allowed per IP per minute |
 | `ORACLE_PUSH_ENABLED`        | `false`                          | Opt in to publishing prices on-chain |
 | `ORACLE_CONTRACT_ID`         | *(unset)*                        | Soroban oracle contract ID       |
-| `ORACLE_ASSET`               | *(unset)*                        | Asset address the price is published under |
+| `ORACLE_ASSET`               | *(unset)*                        | PI asset address the price is published under |
+| `ORACLE_ASSET_USDC`          | *(unset)*                        | USDC asset address (optional)    |
+| `ORACLE_ASSET_USDT`          | *(unset)*                        | USDT asset address (optional)    |
+| `ORACLE_ASSET_OUSD`          | *(unset)*                        | oUSD asset address (optional)    |
 | `ORACLE_RPC_URL`             | `https://rpc.testnet.minepi.com` | Soroban RPC endpoint             |
 | `ORACLE_ADMIN_SECRET`        | *(unset)*                        | Stellar secret key for the oracle admin |
 | `ORACLE_PRICE_DECIMALS`      | `7`                              | Fixed-point decimals for the on-chain price |
@@ -79,17 +86,28 @@ pnpm start
 | `TRUST_DEGRADED_CONFIDENCE`  | `0.5`                            | Confidence below which the oracle is `DEGRADED` |
 | `TRUST_MIN_SOURCE_RATIO`     | `0.5`                            | Minimum fraction of sources that must be usable |
 | `TRUST_RECOVERY_STREAK`      | `3`                              | Healthy evaluations required to leave `RECOVERY` |
+| `STABLE_MIN_SOURCES_REQUIRED`| `1`                              | Minimum usable sources for stablecoin assets |
+| `ASSET_USDC_ENABLED`         | `true`                           | Enable the USDC/USD pipeline     |
+| `ASSET_USDT_ENABLED`         | `true`                           | Enable the USDT/USD pipeline     |
+| `USDC_COINGECKO_ID`          | `usd-coin`                       | CoinGecko id for USDC            |
+| `USDC_OKX_SYMBOL`            | `USDC-USDT`                      | OKX instrument for USDC          |
+| `USDC_MEXC_SYMBOL`           | `USDCUSDT`                       | MEXC symbol for USDC             |
+| `USDT_COINGECKO_ID`          | `tether`                         | CoinGecko id for USDT            |
+| `USDT_OKX_SYMBOL`            | `USDT-USD`                       | OKX instrument for USDT          |
+| `OUSD_PRICE_URL`             | *(unset)*                        | JSON price endpoint for oUSD; unset keeps OUSD unavailable |
+| `OUSD_PRICE_JSON_PATH`       | `price`                          | Dot path to the price in the oUSD response |
 
 ## API Endpoints
 
 ### Price Oracle
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/price` | GET | Aggregated Pi price with provenance, freshness and trust |
-| `/api/v1/history` | GET | Persisted observations (`?hours=24&limit=1000`) |
-| `/api/v1/trust` | GET | Current trust state and transition history |
-| `/api/v1/sources` | GET | Price source status |
-| `/api/v1/health` | GET | Health check (includes `trust_state`) |
+| `/api/v1/assets` | GET | Asset registry with per-asset health |
+| `/api/v1/price?asset=PI` | GET | Aggregated price with provenance, freshness and trust |
+| `/api/v1/history?asset=PI` | GET | Persisted observations (`?hours=24&limit=1000`) |
+| `/api/v1/trust?asset=PI` | GET | Current trust state and transition history |
+| `/api/v1/sources?asset=PI` | GET | Price source status (all assets without `asset`) |
+| `/api/v1/health` | GET | Health check (PI trust plus all asset summaries) |
 | `/metrics` | GET | Prometheus metrics |
 
 ### On-chain Data
@@ -193,18 +211,18 @@ fallbacks) and pruned after `PRICE_RETENTION_DAYS`.
 - `suban_price_usd{symbol}`
 - `suban_price_confidence{symbol}`
 - `suban_price_age_ms{symbol}`
-- `suban_source_up{source}`
-- `suban_source_staleness_ms{source}`
-- `suban_price_aggregations_total{result}`
-- `suban_oracle_push_total{result}`
-- `suban_oracle_trust_state{state}`
+- `suban_source_up{asset,source}`
+- `suban_source_staleness_ms{asset,source}`
+- `suban_price_aggregations_total{asset,result}`
+- `suban_oracle_push_total{asset,result}`
+- `suban_oracle_trust_state{asset,state}`
 - `suban_http_requests_total{method,route,status}`
 
 ### Control plane (authenticated)
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/price/commit` | POST | Commit the current aggregated price |
-| `/api/v1/circuit-breaker/reset` | POST | Reset the price circuit breaker |
+| `/api/v1/price/commit` | POST | Commit `{ "price": number, "asset"?: string }` |
+| `/api/v1/circuit-breaker/reset` | POST | Reset the price circuit breaker for `{ "asset"?: string }` |
 
 These routes require a shared secret and are rate-limited per IP. Send it as
 `x-api-key: <key>` or `Authorization: Bearer <key>`. If

@@ -2,3 +2,10 @@
 # native addon and must be allowed to run its install script.
 onlyBuiltDependencies:
   - better-sqlite3
+
+# Security overrides for patched transitive dependencies. pnpm 12 reads these
+# from pnpm-workspace.yaml, not from package.json.
+overrides:
+  proxy-addr: ^2.0.8
+  form-data: ^4.0.6
+  path-to-regexp: ^0.1.13

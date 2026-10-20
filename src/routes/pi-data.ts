@@ -25,7 +25,7 @@ export function createPiDataRouter(aggregator: PriceAggregator): Router {
       const price = priceData.price_usd;
 
       // Observations are persisted by the aggregator on fresh aggregation.
-      const stats = getPriceStore().getStats();
+      const stats = getPriceStore().getStats({ symbol: 'PI' });
       const priceStr = price.toFixed(4);
 
       res.json({

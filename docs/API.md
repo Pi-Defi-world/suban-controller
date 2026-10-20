@@ -5,11 +5,65 @@ Base URL: `http://localhost:3000` (configurable via `PORT`).
 All responses are JSON unless noted. Timestamps are ISO-8601 UTC strings.
 Price responses carry a `schema_version`; breaking changes to the shape bump it.
 
+## Multi-asset model
+
+The controller tracks four assets with independent sources, caches, circuit
+breakers and trust machines:
+
+| Asset | ID | Default sources |
+|---|---|---|
+| Pi Network | `PI` | MEXC, CoinGecko, OKX, Bitget, optional Arc |
+| USD Coin | `USDC` | CoinGecko, OKX, MEXC |
+| Tether USD | `USDT` | CoinGecko, OKX |
+| oUSD | `OUSD` | Configurable HTTP feed (`OUSD_PRICE_URL`) |
+
+Every price route accepts `?asset=PI|USDC|USDT|OUSD` and defaults to `PI`.
+An unknown asset returns `404`; a registered asset with no configured source
+(for example `OUSD` without `OUSD_PRICE_URL`) returns `503` with
+`"error": "Asset is not configured"`. The controller never invents a peg or
+fallback price.
+
+### `GET /api/v1/assets`
+
+Returns the registry with per-asset health, source counts, oracle address and
+the last committed price.
+
+```json
+{
+  "schema_version": "1.0",
+  "assets": [
+    {
+      "id": "PI",
+      "symbol": "PI",
+      "name": "Pi Network",
+      "enabled": true,
+      "oracle_asset": "G...",
+      "min_sources_required": 1,
+      "sources": [{ "name": "mexc", "status": "active" }],
+      "trust": { "state": "HEALTHY", "since": "...", "reason": "...", "healthy_streak": 3 },
+      "last_committed_price": 0.3125
+    },
+    {
+      "id": "OUSD",
+      "symbol": "OUSD",
+      "name": "oUSD",
+      "enabled": false,
+      "oracle_asset": null,
+      "min_sources_required": 1,
+      "sources": [],
+      "trust": { "state": "DEGRADED", "since": "...", "reason": "no price sources configured", "healthy_streak": 0 },
+      "last_committed_price": null
+    }
+  ]
+}
+```
+
 ## Price oracle
 
-### `GET /api/v1/price`
+### `GET /api/v1/price?asset=PI`
 
-Returns the latest aggregated Pi price with provenance, freshness and trust.
+Returns the latest aggregated price for one asset with provenance, freshness
+and trust. The `symbol` field reflects the selected asset.
 
 ```json
 {
@@ -64,16 +118,17 @@ When the circuit breaker is active, the response uses
 |---|---|---|
 | `HEALTHY` | Enough fresh sources and confidence ≥ `TRUST_DEGRADED_CONFIDENCE` | Allowed |
 | `DEGRADED` | Too few usable sources or confidence below the threshold | Skipped |
-| `BREAKER` | Circuit breaker active; last committed price is served | Skipped |
+| `BREAKER` | Circuit breaker active; last committed price is served (or `503` if none exists) | Skipped |
 | `RECOVERY` | Breaker cleared; waiting for `TRUST_RECOVERY_STREAK` healthy evaluations | Skipped |
 
 The on-chain publisher refuses non-`HEALTHY` observations. A successful push
 commits the price as the new circuit-breaker reference.
 
-### `GET /api/v1/trust`
+### `GET /api/v1/trust?asset=PI`
 
 ```json
 {
+  "asset": "PI",
   "current": { "state": "HEALTHY", "since": "...", "reason": "...", "healthy_streak": 12 },
   "history": [
     { "from": "RECOVERY", "to": "HEALTHY", "at": "...", "reason": "recovered after 3 healthy evaluations" }
@@ -83,13 +138,15 @@ commits the price as the new circuit-breaker reference.
 
 `?limit=` bounds the transition history (1–100, default 50). Newest first.
 
-### `GET /api/v1/history`
+### `GET /api/v1/history?asset=PI`
 
 `?hours=` (1–720, default 24) and `?limit=` (1–10000, default 1000).
+Results are filtered to the selected asset's symbol.
 
 ```json
 {
   "schema_version": "1.0",
+  "asset": "PI",
   "symbol": "PI",
   "window_hours": 24,
   "stats": { "high24h": 0.34, "low24h": 0.29, "open24h": 0.31, "closePrice": 0.3125, "count": 8640 },
@@ -110,10 +167,14 @@ Observations are append-only in SQLite and pruned after
 `PRICE_RETENTION_DAYS`. Only fresh aggregations are stored: cache hits and
 breaker fallbacks are not duplicated.
 
-### `GET /api/v1/sources`
+### `GET /api/v1/sources?asset=PI`
+
+Without `asset` the response returns PI sources plus an asset summary (for
+backward compatibility). With `asset`, only that asset's sources are returned.
 
 ```json
 {
+  "asset": "PI",
   "sources": [
     {
       "name": "mexc",
@@ -124,6 +185,10 @@ breaker fallbacks are not duplicated.
       "avg_response_time_ms": 120,
       "staleness_ms": 800
     }
+  ],
+  "assets": [
+    { "id": "PI", "enabled": true, "trust_state": "HEALTHY", "source_count": 4 },
+    { "id": "OUSD", "enabled": false, "trust_state": "DEGRADED", "source_count": 0 }
   ]
 }
 ```
@@ -144,29 +209,35 @@ breaker fallbacks are not duplicated.
   "active_sources": 4,
   "total_sources": 4,
   "last_price_usd": 0.3125,
-  "circuit_breaker_active": false
+  "circuit_breaker_active": false,
+  "assets": [
+    { "id": "PI", "enabled": true, "trust_state": "HEALTHY", "source_count": 4, "last_committed_price": 0.3125 },
+    { "id": "USDC", "enabled": true, "trust_state": "HEALTHY", "source_count": 3, "last_committed_price": 1.0001 }
+  ]
 }
 ```
 
-`status` is `unhealthy` when the breaker is active, `degraded` when fewer than
-half of the sources are active, and `healthy` otherwise.
+Top-level fields describe PI for backward compatibility. `status` is
+`unhealthy` when the PI breaker is active, `degraded` when the PI trust state
+is not healthy or fewer than half of its sources are active, and `healthy`
+otherwise. Each asset's own trust is reported in `assets`.
 
-### `GET /api/v1/circuit-breaker`
+### `GET /api/v1/circuit-breaker?asset=PI`
 
 ```json
-{ "active": false, "last_committed_price": 0.3125 }
+{ "asset": "PI", "active": false, "last_committed_price": 0.3125 }
 ```
 
-### `GET /api/v1/deviation-alerts`
+### `GET /api/v1/deviation-alerts?asset=PI`
 
-`?limit=` (default 50). Returns `{ "alerts": [...], "count": n }`.
+`?limit=` (default 50). Returns `{ "asset": "PI", "alerts": [...], "count": n }`.
 
 ### Control routes (authenticated)
 
 | Route | Method | Description |
 |---|---|---|
-| `/api/v1/price/commit` | POST | Commit `{ "price": number }` as the circuit-breaker reference |
-| `/api/v1/circuit-breaker/reset` | POST | Clear the breaker |
+| `/api/v1/price/commit` | POST | Commit `{ "price": number, "asset"?: string }` as the circuit-breaker reference |
+| `/api/v1/circuit-breaker/reset` | POST | Clear the breaker for `{ "asset"?: string }` (default PI) |
 
 Both require `x-api-key: <key>` or `Authorization: Bearer <key>` and are
 rate-limited per IP. If `CONTROLLER_ADMIN_API_KEY` is unset they return `503`
@@ -179,6 +250,10 @@ Prometheus text exposition. Includes `suban_price_usd`,
 `suban_source_staleness_ms`, `suban_price_aggregations_total`,
 `suban_oracle_push_total`, `suban_oracle_trust_state` and
 `suban_http_requests_total`, plus Node.js process metrics.
+
+Per-asset metrics carry an `asset` label (`symbol` for the price gauges), so
+PI, USDC, USDT and oUSD remain distinguishable in dashboards. Source metrics
+use `asset` + `source`; trust uses `asset` + `state`.
 
 ## Pi data compatibility routes
 
@@ -239,7 +314,7 @@ Errors use a consistent shape:
 |---|---|
 | `400` | Invalid input |
 | `401` | Missing/invalid control API key |
-| `404` | Unknown route or resource |
+| `404` | Unknown route, resource or asset |
 | `429` | Control route rate limit exceeded |
-| `500` | Upstream or aggregation failure |
-| `503` | Control plane not configured (no API key) |
+| `500` | Unexpected aggregation or upstream failure |
+| `503` | Control plane not configured (no API key), asset has no sources, or no usable/committed price |

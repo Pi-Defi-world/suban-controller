@@ -65,6 +65,26 @@ describe('PriceAggregator', () => {
     });
   });
 
+  it('keeps cache and provenance isolated per asset symbol', async () => {
+    const recorder = new RecordingStore();
+    const pi = new PriceAggregator({ symbol: 'PI', store: recorder });
+    pi.addSource(new FakeSource('alpha', 1));
+    const usdc = new PriceAggregator({ symbol: 'USDC', store: recorder });
+    usdc.addSource(new FakeSource('alpha', 1.01));
+
+    const piPrice = await pi.getAggregatedPrice();
+    const usdcPrice = await usdc.getAggregatedPrice();
+
+    expect(piPrice.symbol).toBe('PI');
+    expect(piPrice.price_usd).toBeCloseTo(1);
+    expect(usdcPrice.symbol).toBe('USDC');
+    expect(usdcPrice.price_usd).toBeCloseTo(1.01);
+    expect(usdcPrice.cache_hit).toBe(false);
+    expect(recorder.observations.map((o) => o.symbol)).toEqual(
+      expect.arrayContaining(['PI', 'USDC'])
+    );
+  });
+
   it('serves cache hits without writing duplicate observations', async () => {
     const recorder = new RecordingStore();
     const aggregator = new PriceAggregator({ store: recorder });

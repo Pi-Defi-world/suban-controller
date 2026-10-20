@@ -34,6 +34,36 @@ export const config = {
   // Aggregation
   outlierThresholdPercent: parseInt(process.env.OUTLIER_THRESHOLD_PERCENT || '10', 10),
   minSourcesRequired: parseInt(process.env.MIN_SOURCES_REQUIRED || '1', 10),
+  stableMinSourcesRequired: parseInt(process.env.STABLE_MIN_SOURCES_REQUIRED || '1', 10),
+
+  // Multi-asset price model
+  assets: {
+    pi: {
+      enabled: (process.env.ASSET_PI_ENABLED || 'true').toLowerCase() === 'true',
+      oracleAsset: process.env.ORACLE_ASSET || '',
+    },
+    usdc: {
+      enabled: (process.env.ASSET_USDC_ENABLED || 'true').toLowerCase() === 'true',
+      oracleAsset: process.env.ORACLE_ASSET_USDC || '',
+      coingeckoId: process.env.USDC_COINGECKO_ID || 'usd-coin',
+      okxSymbol: process.env.USDC_OKX_SYMBOL || 'USDC-USDT',
+      mexcSymbol: process.env.USDC_MEXC_SYMBOL || 'USDCUSDT',
+    },
+    usdt: {
+      enabled: (process.env.ASSET_USDT_ENABLED || 'true').toLowerCase() === 'true',
+      oracleAsset: process.env.ORACLE_ASSET_USDT || '',
+      coingeckoId: process.env.USDT_COINGECKO_ID || 'tether',
+      okxSymbol: process.env.USDT_OKX_SYMBOL || 'USDT-USD',
+    },
+    ousd: {
+      // oUSD has no default market feed. It stays registered but unavailable
+      // until an explicit HTTP feed is configured; we never fabricate a peg.
+      enabled: !!process.env.OUSD_PRICE_URL,
+      oracleAsset: process.env.ORACLE_ASSET_OUSD || '',
+      url: process.env.OUSD_PRICE_URL || '',
+      jsonPath: process.env.OUSD_PRICE_JSON_PATH || 'price',
+    },
+  },
 
   // Source Weights (for weighted average calculation)
   weights: {

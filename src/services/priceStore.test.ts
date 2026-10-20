@@ -64,7 +64,7 @@ describe('PriceStore', () => {
       });
     }
 
-    expect(store.getStats(base - 10_000)).toEqual({
+    expect(store.getStats({ sinceMs: base - 10_000 })).toEqual({
       high24h: 4,
       low24h: 1,
       open24h: 2,
@@ -74,7 +74,36 @@ describe('PriceStore', () => {
   });
 
   it('returns null stats when the window is empty', () => {
-    expect(store.getStats(Date.now() - 1_000)).toBeNull();
+    expect(store.getStats({ sinceMs: Date.now() - 1_000 })).toBeNull();
+  });
+
+  it('filters history and stats by symbol', () => {
+    const base = Date.now();
+    for (const [symbol, price] of [
+      ['PI', 0.08],
+      ['USDC', 1.0],
+      ['USDC', 1.01],
+      ['USDT', 0.999],
+    ] as const) {
+      store.record({
+        symbol,
+        price,
+        confidence: 0.9,
+        sourcesUsed: 2,
+        trustState: 'HEALTHY',
+        observedAt: base,
+      });
+    }
+
+    expect(
+      store.getHistory({ symbol: 'USDC', sinceMs: base - 1_000 }).map((r) => r.price)
+    ).toEqual([1.01, 1.0]);
+    expect(store.getStats({ symbol: 'USDC', sinceMs: base - 1_000 })).toMatchObject({
+      high24h: 1.01,
+      low24h: 1.0,
+      count: 2,
+    });
+    expect(store.getStats({ symbol: 'PI', sinceMs: base - 1_000 })?.count).toBe(1);
   });
 
   it('excludes breaker observations from stats but keeps them in history', () => {
@@ -104,7 +133,7 @@ describe('PriceStore', () => {
       observedAt: base - 1_000,
     });
 
-    expect(store.getStats(base - 10_000)).toEqual({
+    expect(store.getStats({ sinceMs: base - 10_000 })).toEqual({
       high24h: 2,
       low24h: 1,
       open24h: 1,

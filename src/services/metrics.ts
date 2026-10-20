@@ -34,28 +34,28 @@ export const priceAgeGauge = new Gauge({
 export const sourceUpGauge = new Gauge({
   name: 'suban_source_up',
   help: 'Whether a price source is currently usable (1) or not (0)',
-  labelNames: ['source'],
+  labelNames: ['asset', 'source'],
   registers: [metricsRegistry],
 });
 
 export const sourceStalenessGauge = new Gauge({
   name: 'suban_source_staleness_ms',
   help: 'Age of the last successful fetch for a source, in milliseconds',
-  labelNames: ['source'],
+  labelNames: ['asset', 'source'],
   registers: [metricsRegistry],
 });
 
 export const aggregationCounter = new Counter({
   name: 'suban_price_aggregations_total',
   help: 'Aggregation outcomes',
-  labelNames: ['result'],
+  labelNames: ['asset', 'result'],
   registers: [metricsRegistry],
 });
 
 export const oraclePushCounter = new Counter({
   name: 'suban_oracle_push_total',
   help: 'On-chain oracle push outcomes',
-  labelNames: ['result'],
+  labelNames: ['asset', 'result'],
   registers: [metricsRegistry],
 });
 
@@ -72,13 +72,13 @@ export type TrustStateName = (typeof TRUST_STATES)[number];
 export const trustStateGauge = new Gauge({
   name: 'suban_oracle_trust_state',
   help: 'Current oracle trust state (1 for the active state, 0 otherwise)',
-  labelNames: ['state'],
+  labelNames: ['asset', 'state'],
   registers: [metricsRegistry],
 });
 
-export function setTrustState(state: TrustStateName): void {
+export function setTrustState(asset: string, state: TrustStateName): void {
   for (const candidate of TRUST_STATES) {
-    trustStateGauge.set({ state: candidate }, candidate === state ? 1 : 0);
+    trustStateGauge.set({ asset, state: candidate }, candidate === state ? 1 : 0);
   }
 }
 

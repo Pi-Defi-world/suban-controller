@@ -100,30 +100,45 @@ export class PriceStore implements PriceRecorder {
   }
 
   /** Newest first. */
-  getHistory(options: { sinceMs?: number; limit?: number } = {}): PriceObservation[] {
+  getHistory(options: { symbol?: string; sinceMs?: number; limit?: number } = {}): PriceObservation[] {
     const sinceMs = options.sinceMs ?? Date.now() - ONE_DAY_MS;
     const limit = Math.max(1, Math.min(options.limit ?? 1000, 10_000));
+    const clauses = ['observed_at >= @sinceMs'];
+    const params: Record<string, unknown> = { sinceMs, limit };
+    if (options.symbol) {
+      clauses.push('symbol = @symbol');
+      params.symbol = options.symbol;
+    }
+
     return this.db
       .prepare(
         `SELECT id, symbol, price, confidence, sources_used, trust_state, observed_at
            FROM price_observations
-          WHERE observed_at >= ?
+          WHERE ${clauses.join(' AND ')}
           ORDER BY observed_at DESC
-          LIMIT ?`
+          LIMIT @limit`
       )
-      .all(sinceMs, limit) as PriceObservation[];
+      .all(params) as PriceObservation[];
   }
 
-  getStats(sinceMs?: number): PriceStats | null {
-    const cutoff = sinceMs ?? Date.now() - ONE_DAY_MS;
+  getStats(options: { sinceMs?: number; symbol?: string } = {}): PriceStats | null {
+    const cutoff = options.sinceMs ?? Date.now() - ONE_DAY_MS;
+    const clauses = ["observed_at >= @sinceMs", "trust_state != 'BREAKER'"];
+    const params: Record<string, unknown> = { sinceMs: cutoff };
+    if (options.symbol) {
+      clauses.push('symbol = @symbol');
+      params.symbol = options.symbol;
+    }
+    const where = clauses.join(' AND ');
+
     // Breaker observations are kept for audit but excluded from public stats.
     const aggregate = this.db
       .prepare(
         `SELECT MIN(price) AS low, MAX(price) AS high, COUNT(*) AS count
            FROM price_observations
-          WHERE observed_at >= ? AND trust_state != 'BREAKER'`
+          WHERE ${where}`
       )
-      .get(cutoff) as { low: number | null; high: number | null; count: number };
+      .get(params) as { low: number | null; high: number | null; count: number };
 
     if (aggregate.count === 0 || aggregate.low === null || aggregate.high === null) {
       return null;
@@ -133,20 +148,20 @@ export class PriceStore implements PriceRecorder {
       .prepare(
         `SELECT price
            FROM price_observations
-          WHERE observed_at >= ? AND trust_state != 'BREAKER'
+          WHERE ${where}
           ORDER BY observed_at ASC
           LIMIT 1`
       )
-      .get(cutoff) as { price: number };
+      .get(params) as { price: number };
     const close = this.db
       .prepare(
         `SELECT price
            FROM price_observations
-          WHERE observed_at >= ? AND trust_state != 'BREAKER'
+          WHERE ${where}
           ORDER BY observed_at DESC
           LIMIT 1`
       )
-      .get(cutoff) as { price: number };
+      .get(params) as { price: number };
 
     return {
       high24h: aggregate.high,
