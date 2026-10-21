@@ -239,10 +239,10 @@ Request:
 
 Prices come from the controller's live asset aggregators, not from the
 request body. Unknown assets return `404`; a registered asset with no
-configured source returns `503`; a missing price returns `503` without
-partial results. Stale or non-`HEALTHY` prices are returned with
-`data_quality.status: "degraded"` and a warning, because the values are real
-but not fresh.
+configured source returns `503`; a missing or stale price returns `503` without
+partial results. A fresh price whose trust state is not `HEALTHY` is returned
+with `data_quality.status: "degraded"` and a warning, because the value is real
+but not fully trusted.
 
 The response includes `collateral_value_usd`, `debt_value_usd`,
 `health_factor`, `max_borrow_usd`, `liquidation_price_usd_per_collateral_unit`

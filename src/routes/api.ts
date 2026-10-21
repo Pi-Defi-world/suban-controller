@@ -220,6 +220,13 @@ export function createApiRouter(service: PriceService): Router {
       return;
     }
     const asOfMs = requestedAsOf ?? Date.now();
+    if (asOfMs > Date.now() + 60_000) {
+      res.status(400).json({
+        error: 'Invalid as_of',
+        message: 'as_of cannot be in the future',
+      });
+      return;
+    }
     const sinceMs = asOfMs - parsedWindow.seconds * 1_000;
 
     try {
@@ -325,7 +332,7 @@ export function createApiRouter(service: PriceService): Router {
       limitations: [
         'The calculator does not index on-chain lending positions.',
         'Liquidation price is only defined for a single collateral asset.',
-        'A stale or degraded price is returned with data_quality.degraded=true; missing prices return 503.',
+        'A stale or missing price returns 503; a fresh non-HEALTHY price is returned with data_quality.degraded=true.',
       ],
     });
   });
@@ -351,7 +358,16 @@ export function createApiRouter(service: PriceService): Router {
     const resolvePosition = async (
       raw: any,
       field: string
-    ): Promise<PricedRiskPosition | { error: string; status: number; asset?: string }> => {
+    ): Promise<
+      | PricedRiskPosition
+      | {
+          error: string;
+          status: number;
+          asset?: string;
+          age_ms?: number;
+          trust_state?: string;
+        }
+    > => {
       const assetId =
         typeof raw?.asset === 'string' ? raw.asset.toUpperCase() : '';
       if (!assetId) {
@@ -376,6 +392,15 @@ export function createApiRouter(service: PriceService): Router {
 
       try {
         const price = await aggregator.getAggregatedPrice();
+        if (!price.is_fresh) {
+          return {
+            error: 'Price is stale',
+            status: 503,
+            asset: assetId,
+            age_ms: price.age_ms,
+            trust_state: price.trust.state,
+          };
+        }
         return {
           asset: assetId,
           amount: raw.amount,
@@ -409,6 +434,8 @@ export function createApiRouter(service: PriceService): Router {
           res.status(result.status).json({
             error: result.error,
             asset: result.asset,
+            age_ms: result.age_ms,
+            trust_state: result.trust_state,
             available_assets: service.listAssets().map((entry) => entry.id),
           });
           return;
@@ -422,6 +449,8 @@ export function createApiRouter(service: PriceService): Router {
           res.status(result.status).json({
             error: result.error,
             asset: result.asset,
+            age_ms: result.age_ms,
+            trust_state: result.trust_state,
             available_assets: service.listAssets().map((entry) => entry.id),
           });
           return;
