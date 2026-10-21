@@ -476,13 +476,13 @@ export function createApiRouter(service: PriceService): Router {
             ? position.observed_at.toISOString()
             : position.observed_at,
       }));
-      const degraded =
-        prices.some((price) => !price.is_fresh) ||
-        prices.some((price) => price.trust_state !== 'HEALTHY');
+      const degraded = prices.some(
+        (price) => !price.is_fresh || price.trust_state !== 'HEALTHY'
+      );
       const warnings = [...risk.warnings];
       if (degraded) {
         warnings.push(
-          'one or more prices are stale or the oracle trust state is not HEALTHY'
+          'one or more prices have a non-HEALTHY oracle trust state'
         );
       }
 
