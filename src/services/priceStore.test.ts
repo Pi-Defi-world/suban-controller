@@ -180,6 +180,39 @@ describe('PriceStore', () => {
     expect(store.getHistory({ sinceMs: base - 1, limit: 0 })).toHaveLength(1);
   });
 
+  it('returns bounded history in chronological order for statistics', () => {
+    const base = Date.now();
+    store.record({
+      symbol: 'PI',
+      price: 99,
+      confidence: 0,
+      sourcesUsed: 0,
+      trustState: 'BREAKER',
+      observedAt: base - 5_000,
+    });
+    for (const [index, price] of [2, 1, 4, 3].entries()) {
+      store.record({
+        symbol: 'PI',
+        price,
+        confidence: 0.9,
+        sourcesUsed: 3,
+        trustState: 'HEALTHY',
+        observedAt: base - 4_000 + index * 1_000,
+      });
+    }
+
+    expect(
+      store
+        .getHistoryChronological({
+          symbol: 'PI',
+          sinceMs: base - 10_000,
+          untilMs: base,
+          limit: 10,
+        })
+        .map((row) => row.price)
+    ).toEqual([2, 1, 4, 3]);
+  });
+
   it('preserves history across a database reopen', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'suban-prices-'));
     const dbPath = path.join(dir, 'prices.db');

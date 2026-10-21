@@ -4,6 +4,11 @@ Data oracle for Pi Network — aggregates multi-asset price feeds and provides o
 
 Part of the [Suban Data Platform](https://suban.org).
 
+Status: price aggregation, persistence, trust states, TWAP/volatility and the
+deterministic risk calculator are implemented. Liquidity-aware pricing and
+on-chain lending-position ingestion are **not** implemented; the methodology
+endpoint reports those gaps explicitly.
+
 ## Features
 
 - **Multi-Asset Price Feeds**: Independent PI/USD, USDC/USD, USDT/USD and oUSD/USD pipelines
@@ -13,6 +18,8 @@ Part of the [Suban Data Platform](https://suban.org).
 - **Weighted Aggregation**: Smart price averaging with outlier detection and confidence scoring per asset
 - **Fault Tolerant**: Continues operating even if some sources fail; each asset has its own breaker
 - **Persistent History**: Price observations are stored in SQLite and survive restarts (30-day default retention)
+- **TWAP and Volatility**: Versioned, reproducible calculations from persisted observations (`/statistics`, `/twap`, `/volatility`)
+- **Deterministic Risk Calculator**: Versioned health-factor, collateral, max-borrow and liquidation-price formulas (`/risk/*`), with explicit degraded responses
 - **Explicit Trust States**: `HEALTHY` / `DEGRADED` / `BREAKER` / `RECOVERY` per asset with transition history
 - **Observable**: Prometheus metrics at `/metrics` with per-asset labels and provenance/freshness fields on every price
 - **Horizon Proxy**: Transparent proxy to our local Horizon node
@@ -105,6 +112,12 @@ pnpm start
 | `/api/v1/assets` | GET | Asset registry with per-asset health |
 | `/api/v1/price?asset=PI` | GET | Aggregated price with provenance, freshness and trust |
 | `/api/v1/history?asset=PI` | GET | Persisted observations (`?hours=24&limit=1000`) |
+| `/api/v1/statistics?asset=PI&window=24h` | GET | Versioned TWAP and volatility from stored observations |
+| `/api/v1/twap?asset=PI&window=1h` | GET | TWAP entry point (same statistics payload) |
+| `/api/v1/volatility?asset=PI&window=24h` | GET | Volatility entry point (same statistics payload) |
+| `/api/v1/methodology` | GET | Versioned methods and explicit capability gaps |
+| `/api/v1/risk/methods` | GET | Risk formulas, defaults and limitations |
+| `/api/v1/risk/lending` | POST | Deterministic health factor, collateral value, max borrow and liquidation price |
 | `/api/v1/trust?asset=PI` | GET | Current trust state and transition history |
 | `/api/v1/sources?asset=PI` | GET | Price source status (all assets without `asset`) |
 | `/api/v1/health` | GET | Health check (PI trust plus all asset summaries) |

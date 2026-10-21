@@ -121,6 +121,39 @@ export class PriceStore implements PriceRecorder {
       .all(params) as PriceObservation[];
   }
 
+  /**
+   * Oldest first, bounded. Used by reproducible TWAP/volatility calculations
+   * where the order of observations matters. Breaker observations are retained
+   * in history for audit but excluded here, matching public window stats.
+   */
+  getHistoryChronological(
+    options: { symbol?: string; sinceMs?: number; untilMs?: number; limit?: number } = {}
+  ): PriceObservation[] {
+    const sinceMs = options.sinceMs ?? Date.now() - ONE_DAY_MS;
+    const untilMs = options.untilMs ?? Date.now();
+    const limit = Math.max(1, Math.min(options.limit ?? 100_000, 200_000));
+    const clauses = [
+      'observed_at >= @sinceMs',
+      'observed_at <= @untilMs',
+      "trust_state != 'BREAKER'",
+    ];
+    const params: Record<string, unknown> = { sinceMs, untilMs, limit };
+    if (options.symbol) {
+      clauses.push('symbol = @symbol');
+      params.symbol = options.symbol;
+    }
+
+    return this.db
+      .prepare(
+        `SELECT id, symbol, price, confidence, sources_used, trust_state, observed_at
+           FROM price_observations
+          WHERE ${clauses.join(' AND ')}
+          ORDER BY observed_at ASC
+          LIMIT @limit`
+      )
+      .all(params) as PriceObservation[];
+  }
+
   getStats(options: { sinceMs?: number; symbol?: string } = {}): PriceStats | null {
     const cutoff = options.sinceMs ?? Date.now() - ONE_DAY_MS;
     const clauses = ["observed_at >= @sinceMs", "trust_state != 'BREAKER'"];

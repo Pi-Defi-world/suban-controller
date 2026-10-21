@@ -14,6 +14,21 @@ import { controlRateLimit, requireControlAuth } from '../middleware/auth';
 import { getPriceStore } from '../services/priceStore';
 import { PRICE_SCHEMA_VERSION, PriceOracleError } from '../types';
 import { TrustSnapshot } from '../services/trustState';
+import {
+  computePriceStatistics,
+  MAX_WINDOW_SECONDS,
+  parseAsOf,
+  parseWindow,
+  PRICE_STATS_METHOD_VERSION,
+} from '../services/priceStats';
+import {
+  computeLendingRisk,
+  DEFAULT_LIQUIDATION_THRESHOLD,
+  DEFAULT_TARGET_HEALTH_FACTOR,
+  PricedRiskPosition,
+  RISK_METHOD_VERSION,
+  RiskInputError,
+} from '../services/risk';
 
 const router = Router();
 const startTime = Date.now();
@@ -172,6 +187,296 @@ export function createApiRouter(service: PriceService): Router {
         error: 'Failed to fetch price history',
         message: error.message,
       });
+    }
+  });
+
+  /**
+   * GET /api/v1/statistics?asset=PI&window=24h&as_of=...
+   * GET /api/v1/twap?asset=PI&window=1h
+   * GET /api/v1/volatility?asset=PI&window=24h
+   *
+   * All three paths expose the same versioned, deterministic calculation from
+   * persisted observations. They differ only in the documented entry point.
+   */
+  router.get(['/statistics', '/twap', '/volatility'], (req: Request, res: Response) => {
+    const resolved = resolveAsset(service, req.query.asset, res);
+    if (!resolved) return;
+
+    const parsedWindow = parseWindow(req.query.window);
+    if (!parsedWindow) {
+      res.status(400).json({
+        error: 'Invalid window',
+        message: `window must be between 60 seconds and ${MAX_WINDOW_SECONDS} seconds (for example 1h or 30d)`,
+      });
+      return;
+    }
+
+    const requestedAsOf = parseAsOf(req.query.as_of);
+    if (req.query.as_of !== undefined && requestedAsOf === null) {
+      res.status(400).json({
+        error: 'Invalid as_of',
+        message: 'as_of must be an ISO-8601 timestamp, epoch seconds or epoch milliseconds',
+      });
+      return;
+    }
+    const asOfMs = requestedAsOf ?? Date.now();
+    const sinceMs = asOfMs - parsedWindow.seconds * 1_000;
+
+    try {
+      const rows = getPriceStore().getHistoryChronological({
+        symbol: resolved.asset.symbol,
+        sinceMs,
+        untilMs: asOfMs,
+      });
+      const statistics = computePriceStatistics(
+        rows.map((row) => ({ price: row.price, observed_at: row.observed_at })),
+        parsedWindow.seconds,
+        asOfMs
+      );
+
+      if (!statistics) {
+        res.status(503).json({
+          error: 'Insufficient price history',
+          asset: resolved.asset.id,
+          symbol: resolved.asset.symbol,
+          window: parsedWindow.label,
+          window_seconds: parsedWindow.seconds,
+          as_of: new Date(asOfMs).toISOString(),
+          method_version: PRICE_STATS_METHOD_VERSION,
+          reason: 'No persisted observations in the requested window',
+        });
+        return;
+      }
+
+      res.json({
+        schema_version: PRICE_SCHEMA_VERSION,
+        asset: resolved.asset.id,
+        symbol: resolved.asset.symbol,
+        window: parsedWindow.label,
+        window_seconds: parsedWindow.seconds,
+        as_of: new Date(asOfMs).toISOString(),
+        method_version: statistics.method_version,
+        statistics: {
+          ...statistics,
+          first_observed_at: new Date(statistics.first_observed_at_ms).toISOString(),
+          last_observed_at: new Date(statistics.last_observed_at_ms).toISOString(),
+        },
+      });
+    } catch (error: any) {
+      logger.error('Error computing price statistics', {
+        asset: resolved.asset.id,
+        error: error.message,
+      });
+      res.status(500).json({
+        error: 'Failed to compute price statistics',
+        message: error.message,
+      });
+    }
+  });
+
+  /**
+   * GET /api/v1/methodology
+   * Versioned methodology and explicit capability gaps.
+   */
+  router.get('/methodology', (_req: Request, res: Response) => {
+    res.json({
+      schema_version: PRICE_SCHEMA_VERSION,
+      methods: {
+        price_aggregation: 'weighted_average_v1',
+        twap_volatility: PRICE_STATS_METHOD_VERSION,
+        lending_risk: RISK_METHOD_VERSION,
+      },
+      price_quality: {
+        provenance_fields: ['source_prices', 'confidence_score', 'age_ms', 'is_fresh', 'trust'],
+        trust_states: ['HEALTHY', 'DEGRADED', 'BREAKER', 'RECOVERY'],
+        liquidity_aware: false,
+        liquidity_source: null,
+      },
+      gaps: [
+        'Pricing is source-agreement weighted but not liquidity-aware; no pool depth or slippage input is available yet.',
+        'TWAP and volatility are computed only from persisted controller observations.',
+        'Risk is a deterministic calculator; it does not read on-chain lending positions.',
+      ],
+    });
+  });
+
+  /**
+   * GET /api/v1/risk/methods
+   * Published formulas, versions and defaults.
+   */
+  router.get('/risk/methods', (_req: Request, res: Response) => {
+    res.json({
+      method_version: RISK_METHOD_VERSION,
+      defaults: {
+        liquidation_threshold: DEFAULT_LIQUIDATION_THRESHOLD,
+        target_health_factor: DEFAULT_TARGET_HEALTH_FACTOR,
+      },
+      formulas: {
+        collateral_value_usd: 'sum(collateral_amount * price_usd)',
+        debt_value_usd: 'sum(debt_amount * price_usd)',
+        health_factor:
+          'collateral_value_usd * liquidation_threshold / debt_value_usd',
+        max_borrow_usd:
+          'collateral_value_usd * liquidation_threshold / target_health_factor',
+        liquidation_price_usd_per_collateral_unit:
+          'debt_value_usd / (collateral_amount * liquidation_threshold)',
+      },
+      statuses: ['no_debt', 'healthy', 'at_risk', 'liquidatable'],
+      limitations: [
+        'The calculator does not index on-chain lending positions.',
+        'Liquidation price is only defined for a single collateral asset.',
+        'A stale or degraded price is returned with data_quality.degraded=true; missing prices return 503.',
+      ],
+    });
+  });
+
+  /**
+   * POST /api/v1/risk/lending
+   * Body: { collateral: [{asset, amount}], debt: [{asset, amount}],
+   *         liquidation_threshold?, target_health_factor? }
+   *
+   * Unknown assets return 404; registered assets with no configured source
+   * return 503; missing/stale inputs are never replaced with invented prices.
+   */
+  router.post('/risk/lending', async (req: Request, res: Response) => {
+    const body = req.body || {};
+    if (!Array.isArray(body.collateral) || !Array.isArray(body.debt)) {
+      res.status(400).json({
+        error: 'Invalid risk input',
+        message: 'collateral and debt must be arrays',
+      });
+      return;
+    }
+
+    const resolvePosition = async (
+      raw: any,
+      field: string
+    ): Promise<PricedRiskPosition | { error: string; status: number; asset?: string }> => {
+      const assetId =
+        typeof raw?.asset === 'string' ? raw.asset.toUpperCase() : '';
+      if (!assetId) {
+        return { error: `${field}.asset is required`, status: 400 };
+      }
+      if (
+        typeof raw.amount !== 'number' ||
+        !Number.isFinite(raw.amount) ||
+        raw.amount < 0
+      ) {
+        return { error: `${field}.amount must be a finite non-negative number`, status: 400 };
+      }
+
+      const asset = service.getAsset(assetId);
+      if (!asset) {
+        return { error: 'Unknown asset', status: 404, asset: assetId };
+      }
+      const aggregator = service.getAggregator(assetId);
+      if (!aggregator) {
+        return { error: 'Asset is not configured', status: 503, asset: assetId };
+      }
+
+      try {
+        const price = await aggregator.getAggregatedPrice();
+        return {
+          asset: assetId,
+          amount: raw.amount,
+          price_usd: price.price_usd,
+          is_fresh: price.is_fresh,
+          trust_state: price.trust.state,
+          age_ms: price.age_ms,
+          observed_at: price.timestamp,
+        } as PricedRiskPosition & {
+          is_fresh: boolean;
+          trust_state: string;
+          age_ms: number;
+          observed_at: Date;
+        };
+      } catch (error: any) {
+        logger.warn('Risk calculation could not resolve a price', {
+          asset: assetId,
+          error: error.message,
+        });
+        return { error: 'No price available', status: 503, asset: assetId };
+      }
+    };
+
+    try {
+      const collateral: Array<PricedRiskPosition & Record<string, unknown>> = [];
+      const debt: Array<PricedRiskPosition & Record<string, unknown>> = [];
+
+      for (let index = 0; index < body.collateral.length; index += 1) {
+        const result = await resolvePosition(body.collateral[index], `collateral[${index}]`);
+        if ('error' in result) {
+          res.status(result.status).json({
+            error: result.error,
+            asset: result.asset,
+            available_assets: service.listAssets().map((entry) => entry.id),
+          });
+          return;
+        }
+        collateral.push(result as PricedRiskPosition & Record<string, unknown>);
+      }
+
+      for (let index = 0; index < body.debt.length; index += 1) {
+        const result = await resolvePosition(body.debt[index], `debt[${index}]`);
+        if ('error' in result) {
+          res.status(result.status).json({
+            error: result.error,
+            asset: result.asset,
+            available_assets: service.listAssets().map((entry) => entry.id),
+          });
+          return;
+        }
+        debt.push(result as PricedRiskPosition & Record<string, unknown>);
+      }
+
+      const risk = computeLendingRisk({
+        collateral,
+        debt,
+        liquidation_threshold: body.liquidation_threshold,
+        target_health_factor: body.target_health_factor,
+      });
+
+      const prices = [...collateral, ...debt].map((position) => ({
+        asset: position.asset,
+        price_usd: position.price_usd,
+        is_fresh: Boolean(position.is_fresh),
+        trust_state: String(position.trust_state),
+        age_ms: Number(position.age_ms),
+        observed_at:
+          position.observed_at instanceof Date
+            ? position.observed_at.toISOString()
+            : position.observed_at,
+      }));
+      const degraded =
+        prices.some((price) => !price.is_fresh) ||
+        prices.some((price) => price.trust_state !== 'HEALTHY');
+      const warnings = [...risk.warnings];
+      if (degraded) {
+        warnings.push(
+          'one or more prices are stale or the oracle trust state is not HEALTHY'
+        );
+      }
+
+      res.json({
+        schema_version: PRICE_SCHEMA_VERSION,
+        method_version: risk.method_version,
+        data_quality: {
+          status: degraded ? 'degraded' : 'ok',
+          warnings,
+        },
+        prices,
+        risk: {
+          ...risk,
+          warnings,
+        },
+      });
+    } catch (error: any) {
+      if (error instanceof RiskInputError) {
+        res.status(400).json({ error: 'Invalid risk input', message: error.message });
+        return;
+      }
+      logger.error('Error computing lending risk', { error: error.message });
+      res.status(500).json({ error: 'Failed to compute lending risk' });
     }
   });
 

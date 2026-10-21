@@ -167,6 +167,92 @@ Observations are append-only in SQLite and pruned after
 `PRICE_RETENTION_DAYS`. Only fresh aggregations are stored: cache hits and
 breaker fallbacks are not duplicated.
 
+### `GET /api/v1/statistics`, `/twap`, `/volatility`
+
+All three paths return the same versioned calculation from persisted
+observations. `method_version` is `twap_volatility_v1`.
+
+| Query | Meaning |
+|---|---|
+| `asset` | Asset id (default `PI`) |
+| `window` | `60s`–`30d`; accepts `5m`, `24h`, `30d` or plain seconds |
+| `as_of` | Optional ISO-8601 timestamp or epoch seconds/milliseconds for replay |
+
+- TWAP is time-weighted: each observation is held until the next observation
+  (or `as_of` for the last one).
+- Volatility is the sample standard deviation of consecutive log returns,
+  annualised with the average observation interval. It is `null` when fewer
+  than two returns exist.
+- Partial coverage is reported explicitly in `coverage_ratio` and `warnings`;
+  missing history returns `503` rather than a fabricated value.
+
+```json
+{
+  "schema_version": "1.0",
+  "asset": "PI",
+  "symbol": "PI",
+  "window": "24h",
+  "window_seconds": 86400,
+  "as_of": "2026-10-21T12:00:00.000Z",
+  "method_version": "twap_volatility_v1",
+  "statistics": {
+    "sample_count": 1440,
+    "coverage_seconds": 86400,
+    "coverage_ratio": 1,
+    "twap_usd": 0.3121,
+    "min_price_usd": 0.29,
+    "max_price_usd": 0.34,
+    "change_pct": 0.8,
+    "realized_volatility": 0.004,
+    "annualized_volatility": 0.19,
+    "returns_count": 1439,
+    "warnings": []
+  }
+}
+```
+
+### `GET /api/v1/methodology`
+
+Returns the versioned price, TWAP/volatility and risk methods plus explicit
+capability gaps. `price_quality.liquidity_aware` is currently `false`; the
+controller does not have pool depth and does not pretend that source
+agreement is liquidity-aware pricing.
+
+### Risk API
+
+#### `GET /api/v1/risk/methods`
+
+Published formulas, defaults and limitations for `lending_risk_v1`.
+
+#### `POST /api/v1/risk/lending`
+
+Request:
+
+```json
+{
+  "collateral": [{ "asset": "PI", "amount": 100 }],
+  "debt": [{ "asset": "USDC", "amount": 5 }],
+  "liquidation_threshold": 0.8,
+  "target_health_factor": 1.5
+}
+```
+
+Prices come from the controller's live asset aggregators, not from the
+request body. Unknown assets return `404`; a registered asset with no
+configured source returns `503`; a missing price returns `503` without
+partial results. Stale or non-`HEALTHY` prices are returned with
+`data_quality.status: "degraded"` and a warning, because the values are real
+but not fresh.
+
+The response includes `collateral_value_usd`, `debt_value_usd`,
+`health_factor`, `max_borrow_usd`, `liquidation_price_usd_per_collateral_unit`
+and `status` (`no_debt`, `healthy`, `at_risk`, `liquidatable`). The
+liquidation price is only defined for a single collateral asset; a
+multi-collateral basket returns `null` and a warning.
+
+The calculator does not read on-chain lending positions. That is a documented
+Phase 3 gap, not an implied capability.
+
 ### `GET /api/v1/sources?asset=PI`
 
 Without `asset` the response returns PI sources plus an asset summary (for
