@@ -109,6 +109,11 @@ export const config = {
   priceDbPath: process.env.PRICE_DB_PATH || './data/prices.db',
   priceRetentionDays: parseInt(process.env.PRICE_RETENTION_DAYS || '30', 10),
 
+  // Optional read-only data-platform client. Used by the indexed lending-risk
+  // view; the core calculator remains independent of it.
+  dataPlatformUrl: process.env.DATA_PLATFORM_URL || '',
+  dataPlatformApiKey: process.env.DATA_PLATFORM_API_KEY || '',
+
   // Trust state thresholds
   trustDegradedConfidence: parseFloat(process.env.TRUST_DEGRADED_CONFIDENCE || '0.5'),
   trustMinSourceRatio: parseFloat(process.env.TRUST_MIN_SOURCE_RATIO || '0.5'),

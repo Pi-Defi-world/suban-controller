@@ -90,6 +90,8 @@ pnpm start
 | `ORACLE_PUSH_INTERVAL_MS`    | `60000`                          | How often to attempt a price push |
 | `PRICE_DB_PATH`              | `./data/prices.db`               | SQLite file for price observations (`:memory:` for tests) |
 | `PRICE_RETENTION_DAYS`       | `30`                             | How long price observations are kept |
+| `DATA_PLATFORM_URL`          | *(unset)*                        | Enables indexed lending risk and indexed CPMM quotes |
+| `DATA_PLATFORM_API_KEY`      | *(unset)*                        | Optional `x-api-key` for the data platform |
 | `TRUST_DEGRADED_CONFIDENCE`  | `0.5`                            | Confidence below which the oracle is `DEGRADED` |
 | `TRUST_MIN_SOURCE_RATIO`     | `0.5`                            | Minimum fraction of sources that must be usable |
 | `TRUST_RECOVERY_STREAK`      | `3`                              | Healthy evaluations required to leave `RECOVERY` |
@@ -118,6 +120,9 @@ pnpm start
 | `/api/v1/methodology` | GET | Versioned methods and explicit capability gaps |
 | `/api/v1/risk/methods` | GET | Risk formulas, defaults and limitations |
 | `/api/v1/risk/lending` | POST | Deterministic health factor, collateral value, max borrow and liquidation price |
+| `/api/v1/risk/lending/indexed/:account` | GET | Opt-in indexed lending position risk (`DATA_PLATFORM_URL`) |
+| `/api/v1/quote/cpmm` | POST | Deterministic CPMM preview over caller-supplied reserves |
+| `/api/v1/quote/cpmm/:contractId` | GET | CPMM preview over latest indexed pool state |
 | `/api/v1/trust?asset=PI` | GET | Current trust state and transition history |
 | `/api/v1/sources?asset=PI` | GET | Price source status (all assets without `asset`) |
 | `/api/v1/health` | GET | Health check (PI trust plus all asset summaries) |

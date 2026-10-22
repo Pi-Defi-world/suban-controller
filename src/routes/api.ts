@@ -7,6 +7,7 @@
  */
 import { Router, Request, Response } from 'express';
 import { AssetDefinition } from '../assets/types';
+import { config } from '../config';
 import { PriceAggregator } from '../services/aggregator';
 import { PriceService } from '../services/priceService';
 import { logger } from '../utils/logger';
@@ -29,6 +30,13 @@ import {
   RISK_METHOD_VERSION,
   RiskInputError,
 } from '../services/risk';
+import {
+  DataPlatformError,
+  fetchIndexedLendingPosition,
+  fetchIndexedPoolState,
+  rawToHuman,
+} from '../services/dataPlatform';
+import { quoteCpmm, QuoteInputError } from '../services/quote';
 
 const router = Router();
 const startTime = Date.now();
@@ -330,7 +338,8 @@ export function createApiRouter(service: PriceService): Router {
       },
       statuses: ['no_debt', 'healthy', 'at_risk', 'liquidatable'],
       limitations: [
-        'The calculator does not index on-chain lending positions.',
+        'The POST calculator accepts caller-supplied positions; GET /risk/lending/indexed/:account reads indexed event snapshots when DATA_PLATFORM_URL is configured.',
+        'Indexed positions can lag the chain and are not live contract storage.',
         'Liquidation price is only defined for a single collateral asset.',
         'A stale or missing price returns 503; a fresh non-HEALTHY price is returned with data_quality.degraded=true.',
       ],
@@ -506,6 +515,432 @@ export function createApiRouter(service: PriceService): Router {
       }
       logger.error('Error computing lending risk', { error: error.message });
       res.status(500).json({ error: 'Failed to compute lending risk' });
+    }
+  });
+
+  /**
+   * GET /api/v1/risk/lending/indexed/:account
+   *
+   * Reads the latest lending position snapshot from the data platform and
+   * prices it with the same fresh-only asset policy as POST /risk/lending.
+   * The source is explicitly labelled `indexed_contract_events`; this route
+   * does not claim live contract storage or real-time execution.
+   *
+   * Query:
+   * - collateral_asset (default PI)
+   * - debt_asset (default USDC)
+   * - collateral_decimals (required)
+   * - debt_decimals (required)
+   * - liquidation_threshold (optional, 0..1)
+   * - target_health_factor (optional, >=1)
+   */
+  router.get('/risk/lending/indexed/:account', async (req: Request, res: Response) => {
+    const account = req.params.account;
+    if (!/^G[A-Z2-7]{55}$/.test(account)) {
+      res.status(400).json({
+        error: 'Invalid account',
+        message: 'Expected a Stellar account address.',
+      });
+      return;
+    }
+
+    const parseDecimals = (raw: unknown): number | null => {
+      if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+      const value = Number(raw);
+      return Number.isInteger(value) && value >= 0 && value <= 24 ? value : null;
+    };
+    const collateralDecimals = parseDecimals(req.query.collateral_decimals);
+    const debtDecimals = parseDecimals(req.query.debt_decimals);
+    if (collateralDecimals === null || debtDecimals === null) {
+      res.status(400).json({
+        error: 'Invalid decimals',
+        message:
+          'collateral_decimals and debt_decimals are required integers between 0 and 24.',
+      });
+      return;
+    }
+
+    const collateralAsset = String(req.query.collateral_asset || 'PI').toUpperCase();
+    const debtAsset = String(req.query.debt_asset || 'USDC').toUpperCase();
+    const liquidationThreshold =
+      req.query.liquidation_threshold === undefined
+        ? undefined
+        : Number(req.query.liquidation_threshold);
+    const targetHealthFactor =
+      req.query.target_health_factor === undefined
+        ? undefined
+        : Number(req.query.target_health_factor);
+
+    let indexed;
+    try {
+      indexed = await fetchIndexedLendingPosition(account);
+    } catch (error: any) {
+      if (error instanceof DataPlatformError) {
+        res.status(error.status).json({
+          error: 'Indexed lending position unavailable',
+          message: error.message,
+        });
+        return;
+      }
+      logger.error('Failed to read indexed lending position', {
+        account,
+        error: error.message,
+      });
+      res.status(503).json({
+        error: 'Indexed lending position unavailable',
+        message: 'The data platform could not be reached.',
+      });
+      return;
+    }
+
+    let collateralAmount: number;
+    let debtAmount: number;
+    try {
+      collateralAmount = rawToHuman(
+        indexed.position.collateral_raw,
+        collateralDecimals
+      );
+      debtAmount = rawToHuman(indexed.position.borrow_raw, debtDecimals);
+    } catch (error: any) {
+      res.status(400).json({
+        error: 'Invalid indexed position',
+        message: error.message,
+      });
+      return;
+    }
+
+    const resolvePrice = async (
+      assetId: string,
+      amount: number,
+      field: string
+    ): Promise<
+      | {
+          asset: string;
+          amount: number;
+          price_usd: number;
+          is_fresh: boolean;
+          trust_state: string;
+          age_ms: number;
+          observed_at: string | Date;
+        }
+      | { error: string; status: number; asset: string; age_ms?: number; trust_state?: string }
+    > => {
+      if (amount === 0) {
+        return {
+          asset: assetId,
+          amount: 0,
+          price_usd: 1,
+          is_fresh: true,
+          trust_state: 'NOT_REQUIRED',
+          age_ms: 0,
+          observed_at: new Date().toISOString(),
+        };
+      }
+      const asset = service.getAsset(assetId);
+      if (!asset) {
+        return { error: 'Unknown asset', status: 404, asset: assetId };
+      }
+      const aggregator = service.getAggregator(assetId);
+      if (!aggregator) {
+        return { error: 'Asset is not configured', status: 503, asset: assetId };
+      }
+      try {
+        const price = await aggregator.getAggregatedPrice();
+        if (!price.is_fresh) {
+          return {
+            error: 'Price is stale',
+            status: 503,
+            asset: assetId,
+            age_ms: price.age_ms,
+            trust_state: price.trust.state,
+          };
+        }
+        return {
+          asset: assetId,
+          amount,
+          price_usd: price.price_usd,
+          is_fresh: price.is_fresh,
+          trust_state: price.trust.state,
+          age_ms: price.age_ms,
+          observed_at: price.timestamp,
+        };
+      } catch (error: any) {
+        logger.warn('Indexed risk could not resolve a price', {
+          asset: assetId,
+          field,
+          error: error.message,
+        });
+        return { error: 'No price available', status: 503, asset: assetId };
+      }
+    };
+
+    const [collateralPrice, debtPrice] = await Promise.all([
+      resolvePrice(collateralAsset, collateralAmount, 'collateral'),
+      resolvePrice(debtAsset, debtAmount, 'debt'),
+    ]);
+    for (const result of [collateralPrice, debtPrice]) {
+      if ('error' in result) {
+        res.status(result.status).json({
+          error: result.error,
+          asset: result.asset,
+          age_ms: result.age_ms,
+          trust_state: result.trust_state,
+          available_assets: service.listAssets().map((entry) => entry.id),
+        });
+        return;
+      }
+    }
+
+    try {
+      const validCollateral = collateralPrice as Exclude<
+        typeof collateralPrice,
+        { error: string }
+      >;
+      const validDebt = debtPrice as Exclude<typeof debtPrice, { error: string }>;
+      const collateral = collateralAmount > 0 ? [validCollateral] : [];
+      const debt = debtAmount > 0 ? [validDebt] : [];
+      const risk = computeLendingRisk({
+        collateral: collateral as PricedRiskPosition[],
+        debt: debt as PricedRiskPosition[],
+        liquidation_threshold: liquidationThreshold,
+        target_health_factor: targetHealthFactor,
+      });
+      const prices = [...collateral, ...debt]
+        .filter((position) => position.amount > 0)
+        .map((position) => ({
+          asset: position.asset,
+          price_usd: position.price_usd,
+          is_fresh: Boolean((position as any).is_fresh),
+          trust_state: String((position as any).trust_state),
+          age_ms: Number((position as any).age_ms),
+          observed_at:
+            (position as any).observed_at instanceof Date
+              ? (position as any).observed_at.toISOString()
+              : (position as any).observed_at,
+        }));
+      const degraded = prices.some(
+        (price) => !price.is_fresh || price.trust_state !== 'HEALTHY'
+      );
+      const warnings = [...risk.warnings];
+      if (degraded) {
+        warnings.push('one or more prices have a non-HEALTHY oracle trust state');
+      }
+      warnings.push(
+        'position state comes from indexed lending events and may lag the chain'
+      );
+
+      res.json({
+        schema_version: PRICE_SCHEMA_VERSION,
+        method_version: risk.method_version,
+        source: {
+          type: 'indexed_contract_events',
+          account,
+          contract_id: indexed.contract_id,
+          contract_name: indexed.contract_name,
+          as_of: indexed.as_of,
+          data_platform: config.dataPlatformUrl,
+        },
+        position: {
+          collateral: {
+            asset: collateralAsset,
+            amount: collateralAmount,
+            decimals: collateralDecimals,
+            raw: indexed.position.collateral_raw,
+          },
+          debt: {
+            asset: debtAsset,
+            amount: debtAmount,
+            decimals: debtDecimals,
+            raw: indexed.position.borrow_raw,
+          },
+          deposit_raw: indexed.position.deposit_raw,
+          totals: indexed.totals,
+        },
+        data_quality: {
+          status: degraded ? 'degraded' : 'ok',
+          warnings,
+        },
+        prices,
+        risk: {
+          ...risk,
+          warnings,
+        },
+      });
+    } catch (error: any) {
+      if (error instanceof RiskInputError) {
+        res.status(400).json({ error: 'Invalid risk input', message: error.message });
+        return;
+      }
+      logger.error('Error computing indexed lending risk', { error: error.message });
+      res.status(500).json({ error: 'Failed to compute indexed lending risk' });
+    }
+  });
+
+  /**
+   * POST /api/v1/quote/cpmm
+   *
+   * Deterministic CPMM preview using caller-supplied reserves. This is not an
+   * execution-time quote and does not discover pools or routes. Amounts are raw
+   * integer token units.
+   *
+   * Body: { reserve_in, reserve_out, amount_in, fee_bps }
+   */
+  router.post('/quote/cpmm', (req: Request, res: Response) => {
+    const body = req.body || {};
+    const feeBps = body.fee_bps === undefined ? 30 : body.fee_bps;
+    if (typeof feeBps !== 'number' || !Number.isInteger(feeBps)) {
+      res.status(400).json({
+        error: 'Invalid quote input',
+        message: 'fee_bps must be an integer between 0 and 1000',
+      });
+      return;
+    }
+    try {
+      const quote = quoteCpmm({
+        reserveIn: body.reserve_in,
+        reserveOut: body.reserve_out,
+        amountIn: body.amount_in,
+        feeBps,
+      });
+      res.json({
+        schema_version: 'quote_v1',
+        data_quality: {
+          status: 'preview',
+          state_source: 'request',
+          warnings: [
+            'Reserves are caller-supplied; this is not an execution-time quote.',
+            'Amounts are raw integer token units; apply token decimals before display.',
+          ],
+        },
+        quote,
+      });
+    } catch (error: any) {
+      if (error instanceof QuoteInputError) {
+        res.status(400).json({ error: 'Invalid quote input', message: error.message });
+        return;
+      }
+      logger.error('Error computing CPMM quote', { error: error.message });
+      res.status(500).json({ error: 'Failed to compute CPMM quote' });
+    }
+  });
+
+  /**
+   * GET /api/v1/quote/cpmm/:contractId?token_in=...&amount_in=...
+   *
+   * Uses the latest enriched pool state from the data platform. It is still a
+   * preview over indexed state, not a live `get_quote` simulation.
+   */
+  router.get('/quote/cpmm/:contractId', async (req: Request, res: Response) => {
+    const tokenIn = String(req.query.token_in || '');
+    const amountIn = String(req.query.amount_in || '');
+    if (!tokenIn || !amountIn) {
+      res.status(400).json({
+        error: 'Invalid quote input',
+        message: 'token_in and amount_in are required.',
+      });
+      return;
+    }
+
+    let state;
+    try {
+      state = await fetchIndexedPoolState(req.params.contractId);
+    } catch (error: any) {
+      if (error instanceof DataPlatformError) {
+        res.status(error.status).json({
+          error: 'Indexed pool state unavailable',
+          message: error.message,
+        });
+        return;
+      }
+      logger.error('Failed to read indexed pool state', {
+        contract_id: req.params.contractId,
+        error: error.message,
+      });
+      res.status(503).json({
+        error: 'Indexed pool state unavailable',
+        message: 'The data platform could not be reached.',
+      });
+      return;
+    }
+
+    if (state.pool_kind !== 'cpmm') {
+      res.status(400).json({
+        error: 'Unsupported pool kind',
+        message: 'Only constant-product pools are supported by this quote endpoint.',
+        pool_kind: state.pool_kind,
+      });
+      return;
+    }
+    if (state.fee_bps === null) {
+      res.status(503).json({
+        error: 'Indexed pool state unavailable',
+        message: 'The latest pool event does not contain a fee.',
+      });
+      return;
+    }
+
+    let reserveIn: string;
+    let reserveOut: string;
+    if (tokenIn === state.token_a) {
+      reserveIn = state.reserve_a_raw;
+      reserveOut = state.reserve_b_raw;
+    } else if (tokenIn === state.token_b) {
+      reserveIn = state.reserve_b_raw;
+      reserveOut = state.reserve_a_raw;
+    } else {
+      res.status(400).json({
+        error: 'Unknown token_in',
+        message: 'token_in must be one of the pool token addresses.',
+        token_a: state.token_a,
+        token_b: state.token_b,
+      });
+      return;
+    }
+
+    try {
+      const quote = quoteCpmm({
+        reserveIn,
+        reserveOut,
+        amountIn,
+        feeBps: state.fee_bps,
+      });
+      res.json({
+        schema_version: 'quote_v1',
+        data_quality: {
+          status: 'preview',
+          state_source: 'indexed_pool_events',
+          as_of: {
+            ledger: state.ledger,
+            observed_at: state.observed_at,
+          },
+          warnings: [
+            'Reserves come from indexed events and may lag the chain.',
+            'This is not a live get_quote simulation and is not an execution guarantee.',
+            'Amounts are raw integer token units; apply token decimals before display.',
+          ],
+        },
+        pool: {
+          contract_id: state.contract_id,
+          contract_name: state.contract_name,
+          token_a: state.token_a,
+          token_b: state.token_b,
+          reserve_a_raw: state.reserve_a_raw,
+          reserve_b_raw: state.reserve_b_raw,
+          fee_bps: state.fee_bps,
+        },
+        quote: {
+          ...quote,
+          token_in: tokenIn,
+          token_out: tokenIn === state.token_a ? state.token_b : state.token_a,
+        },
+      });
+    } catch (error: any) {
+      if (error instanceof QuoteInputError) {
+        res.status(400).json({ error: 'Invalid quote input', message: error.message });
+        return;
+      }
+      logger.error('Error computing indexed CPMM quote', { error: error.message });
+      res.status(500).json({ error: 'Failed to compute CPMM quote' });
     }
   });
 

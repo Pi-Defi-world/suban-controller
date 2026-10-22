@@ -250,8 +250,51 @@ and `status` (`no_debt`, `healthy`, `at_risk`, `liquidatable`). The
 liquidation price is only defined for a single collateral asset; a
 multi-collateral basket returns `null` and a warning.
 
-The calculator does not read on-chain lending positions. That is a documented
-Phase 3 gap, not an implied capability.
+The POST calculator does not read on-chain lending positions. That remains
+caller-supplied input.
+
+#### `GET /api/v1/risk/lending/indexed/:account`
+
+Reads the latest lending position snapshot from the data platform. Requires
+`DATA_PLATFORM_URL` (and optionally `DATA_PLATFORM_API_KEY`). Query parameters:
+
+- `collateral_decimals` (required integer 0-24)
+- `debt_decimals` (required integer 0-24)
+- `collateral_asset` (default `PI`)
+- `debt_asset` (default `USDC`)
+- `liquidation_threshold`, `target_health_factor` (optional)
+
+The response includes `source.type: "indexed_contract_events"`, the source
+ledger/timestamp, raw and human amounts, prices and the same `risk` object as
+the POST route. Missing data-platform configuration or stale/missing prices
+return `503`; an unknown asset returns `404`. Indexed snapshots can lag the
+chain and are not live contract storage.
+
+### Quote Preview API
+
+#### `POST /api/v1/quote/cpmm`
+
+Body uses raw integer token units:
+
+```json
+{
+  "reserve_in": "1000000",
+  "reserve_out": "1000000",
+  "amount_in": "1000",
+  "fee_bps": 30
+}
+```
+
+Returns `schema_version: "quote_v1"`, `data_quality.status: "preview"`,
+`amount_out_raw`, `fee_amount_raw`, spot/execution price and
+`price_impact_bps`. It mirrors the CPMM contract's integer arithmetic.
+
+#### `GET /api/v1/quote/cpmm/:contractId?token_in=...&amount_in=...`
+
+Uses the latest enriched pool state from the data platform. It refuses
+non-CPMM pools and states without token/reserve/fee metadata, and exposes the
+source ledger in `data_quality.as_of`. This is an indexed-state preview, not a
+live `get_quote` simulation.
 
 ### `GET /api/v1/sources?asset=PI`
 
