@@ -970,6 +970,13 @@ export function createApiRouter(service: PriceService): Router {
       });
       return;
     }
+    if (!/^[CG][A-Z2-7]{55}$/.test(tokenIn) || !/^[CG][A-Z2-7]{55}$/.test(tokenOut)) {
+      res.status(400).json({
+        error: 'Invalid route input',
+        message: 'token_in and token_out must be Stellar contract or account addresses.',
+      });
+      return;
+    }
     if (!Number.isInteger(maxHops) || maxHops < 1 || maxHops > MAX_ROUTE_HOPS) {
       res.status(400).json({
         error: 'Invalid route input',
