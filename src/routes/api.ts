@@ -33,10 +33,13 @@ import {
 import {
   DataPlatformError,
   fetchIndexedLendingPosition,
+  fetchIndexedPools,
   fetchIndexedPoolState,
   rawToHuman,
 } from '../services/dataPlatform';
 import { quoteCpmm, QuoteInputError } from '../services/quote';
+import { findBestCpmmRoute, MAX_ROUTE_HOPS, RouteInputError } from '../services/route';
+import { QuoteSimulationError, simulateCpmmQuote } from '../services/onChainQuote';
 
 const router = Router();
 const startTime = Date.now();
@@ -941,6 +944,222 @@ export function createApiRouter(service: PriceService): Router {
       }
       logger.error('Error computing indexed CPMM quote', { error: error.message });
       res.status(500).json({ error: 'Failed to compute CPMM quote' });
+    }
+  });
+
+  /**
+   * GET /api/v1/route/cpmm?token_in=...&token_out=...&amount_in=...[&max_hops=2]
+   *
+   * Route discovery over indexed CPMM pool state. Only pools with enriched
+   * token/reserve/fee events are considered; there are no synthetic venues and
+   * no stableswap hops. The result is a preview over indexed state, not an
+   * execution-time quote.
+   */
+  router.get('/route/cpmm', async (req: Request, res: Response) => {
+    const tokenIn = String(req.query.token_in || '');
+    const tokenOut = String(req.query.token_out || '');
+    const amountIn = String(req.query.amount_in || '');
+    const maxHopsRaw = req.query.max_hops;
+    const maxHops =
+      maxHopsRaw === undefined ? 2 : Number(String(maxHopsRaw));
+
+    if (!tokenIn || !tokenOut || !amountIn) {
+      res.status(400).json({
+        error: 'Invalid route input',
+        message: 'token_in, token_out and amount_in are required.',
+      });
+      return;
+    }
+    if (!Number.isInteger(maxHops) || maxHops < 1 || maxHops > MAX_ROUTE_HOPS) {
+      res.status(400).json({
+        error: 'Invalid route input',
+        message: `max_hops must be an integer between 1 and ${MAX_ROUTE_HOPS}.`,
+      });
+      return;
+    }
+
+    let pools;
+    try {
+      pools = await fetchIndexedPools();
+    } catch (error: any) {
+      if (error instanceof DataPlatformError) {
+        res.status(error.status).json({
+          error: 'Indexed pool data unavailable',
+          message: error.message,
+        });
+        return;
+      }
+      logger.error('Failed to list indexed pools', { error: error.message });
+      res.status(503).json({
+        error: 'Indexed pool data unavailable',
+        message: 'The data platform could not be reached.',
+      });
+      return;
+    }
+
+    const routePools = pools.flatMap((pool) => {
+      if (!pool.state || pool.state.fee_bps === null) return [];
+      return [
+        {
+          contract_id: pool.contract_id,
+          pool_kind: pool.pool_kind,
+          token_a: pool.state.token_a,
+          token_b: pool.state.token_b,
+          reserve_a_raw: pool.state.reserve_a_raw,
+          reserve_b_raw: pool.state.reserve_b_raw,
+          fee_bps: pool.state.fee_bps,
+          ledger: pool.state.ledger,
+          observed_at: pool.state.observed_at,
+        },
+      ];
+    });
+
+    try {
+      const route = findBestCpmmRoute(routePools, tokenIn, tokenOut, amountIn, maxHops);
+      if (!route) {
+        res.status(404).json({
+          error: 'No indexed route',
+          message:
+            'No CPMM route with enriched indexed liquidity connects these tokens.',
+          tokens_considered: routePools.length,
+        });
+        return;
+      }
+
+      res.json({
+        schema_version: 'route_v1',
+        data_quality: {
+          status: 'preview',
+          state_source: 'indexed_pool_events',
+          as_of: {
+            ledger_min: route.source_ledger_min,
+            ledger_max: route.source_ledger_max,
+          },
+          pools_considered: routePools.length,
+          warnings: [
+            'Only CPMM pools with enriched indexed events are considered; stableswap pools are excluded.',
+            'Indexed reserves may lag the chain; this is not an execution guarantee.',
+            'Amounts are raw integer token units; token decimals differ per hop.',
+          ],
+        },
+        route,
+        sources: route.hops.map((hop) => {
+          const pool = routePools.find(
+            (candidate) => candidate.contract_id === hop.pool_contract_id
+          );
+          return {
+            contract_id: hop.pool_contract_id,
+            ledger: pool?.ledger ?? 0,
+            observed_at: pool?.observed_at ?? null,
+          };
+        }),
+      });
+    } catch (error: any) {
+      if (error instanceof RouteInputError) {
+        res.status(400).json({ error: 'Invalid route input', message: error.message });
+        return;
+      }
+      if (error instanceof QuoteInputError) {
+        res.status(400).json({ error: 'Invalid route input', message: error.message });
+        return;
+      }
+      logger.error('Error computing CPMM route', { error: error.message });
+      res.status(500).json({ error: 'Failed to compute CPMM route' });
+    }
+  });
+
+  /**
+   * GET /api/v1/quote/cpmm/:contractId/onchain?token_in=...&amount_in=...
+   *
+   * Calls the deployed contract's `get_quote` through Soroban simulation and
+   * compares it with the deterministic preview. Requires
+   * QUOTE_SIMULATION_SOURCE_ACCOUNT; never signs or submits a transaction.
+   */
+  router.get('/quote/cpmm/:contractId/onchain', async (req: Request, res: Response) => {
+    const tokenIn = String(req.query.token_in || '');
+    const amountIn = String(req.query.amount_in || '');
+    if (!tokenIn || !amountIn) {
+      res.status(400).json({
+        error: 'Invalid quote input',
+        message: 'token_in and amount_in are required.',
+      });
+      return;
+    }
+
+    try {
+      const simulated = await simulateCpmmQuote({
+        contractId: req.params.contractId,
+        tokenIn,
+        amountIn,
+      });
+      const quote = quoteCpmm({
+        reserveIn: simulated.reserve_in_raw,
+        reserveOut: simulated.reserve_out_raw,
+        amountIn,
+        feeBps: simulated.fee_bps,
+      });
+
+      res.json({
+        schema_version: 'quote_v1',
+        data_quality: {
+          status: simulated.parity ? 'simulated' : 'mismatch',
+          state_source: 'on_chain_simulation',
+          network: config.quoteSimulationNetworkPassphrase,
+          as_of: { ledger: simulated.ledger },
+          warnings: simulated.parity
+            ? [
+                'Amounts are raw integer token units; apply token decimals before display.',
+                'Simulation reads current ledger state but is still not an execution guarantee.',
+              ]
+            : [
+                'The deployed get_quote result did not match the deterministic preview; do not use this quote for execution.',
+                'Amounts are raw integer token units; apply token decimals before display.',
+              ],
+        },
+        pool: {
+          contract_id: simulated.contract_id,
+          token_in: simulated.token_in,
+          token_out: simulated.token_out,
+          reserve_in_raw: simulated.reserve_in_raw,
+          reserve_out_raw: simulated.reserve_out_raw,
+          fee_bps: simulated.fee_bps,
+        },
+        quote: {
+          ...quote,
+          token_in: simulated.token_in,
+          token_out: simulated.token_out,
+        },
+        on_chain: {
+          amount_out_raw: simulated.amount_out_raw,
+          ledger: simulated.ledger,
+        },
+        parity: {
+          matches: simulated.parity,
+          preview_amount_out_raw: simulated.preview_amount_out_raw,
+          on_chain_amount_out_raw: simulated.amount_out_raw,
+          method_version: quote.method_version,
+        },
+      });
+    } catch (error: any) {
+      if (error instanceof QuoteSimulationError) {
+        res.status(error.status).json({
+          error: 'On-chain quote unavailable',
+          message: error.message,
+        });
+        return;
+      }
+      if (error instanceof QuoteInputError) {
+        res.status(400).json({ error: 'Invalid quote input', message: error.message });
+        return;
+      }
+      logger.error('Error simulating on-chain CPMM quote', {
+        contract_id: req.params.contractId,
+        error: error.message,
+      });
+      res.status(503).json({
+        error: 'On-chain quote unavailable',
+        message: 'The contract could not be simulated.',
+      });
     }
   });
 

@@ -2,6 +2,7 @@ import axios from 'axios';
 import {
   DataPlatformError,
   fetchIndexedLendingPosition,
+  fetchIndexedPools,
   rawToHuman,
 } from './dataPlatform';
 
@@ -79,5 +80,64 @@ describe('data platform lending client', () => {
     expect(rawToHuman('12345678', 7)).toBeCloseTo(1.2345678);
     expect(() => rawToHuman('1', -1)).toThrow('decimals');
     expect(() => rawToHuman('not-an-int', 7)).toThrow('Invalid raw amount');
+  });
+
+  it('lists indexed pools and preserves unenriched pools as null state', async () => {
+    mockedGet.mockResolvedValue({
+      status: 200,
+      data: {
+        data: [
+          {
+            contract_id: 'CPOOL1',
+            contract_name: 'cpmm-pool',
+            pool_kind: 'cpmm',
+            event_count: 4,
+            trade_count: 2,
+            last_event_at: '2026-10-22T00:00:00.000Z',
+            state: {
+              reserve_a_raw: '1000',
+              reserve_b_raw: '2000',
+              total_shares_raw: '1400',
+              token_a: 'CTOKENA',
+              token_b: 'CTOKENB',
+              fee_bps: 30,
+              amplification: null,
+              observed_at: '2026-10-22T00:00:00.000Z',
+              ledger: 106,
+            },
+          },
+          {
+            contract_id: 'CPOOL2',
+            contract_name: 'cpmm-pool',
+            pool_kind: 'cpmm',
+            event_count: 1,
+            trade_count: 0,
+            last_event_at: null,
+            state: null,
+          },
+        ],
+      },
+    } as any);
+
+    const pools = await fetchIndexedPools({ baseUrl: 'http://data.test' });
+    expect(mockedGet).toHaveBeenCalledWith(
+      'http://data.test/financial/pools?limit=1000',
+      expect.any(Object)
+    );
+    expect(pools).toHaveLength(2);
+    expect(pools[0].state).toMatchObject({
+      token_a: 'CTOKENA',
+      reserve_a_raw: '1000',
+      fee_bps: 30,
+      ledger: 106,
+    });
+    expect(pools[1].state).toBeNull();
+  });
+
+  it('maps a malformed pool list to a 502', async () => {
+    mockedGet.mockResolvedValue({ status: 200, data: { data: {} } } as any);
+    await expect(
+      fetchIndexedPools({ baseUrl: 'http://data.test' })
+    ).rejects.toMatchObject({ status: 502 });
   });
 });

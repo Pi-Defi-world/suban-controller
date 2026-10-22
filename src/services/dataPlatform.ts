@@ -24,6 +24,20 @@ export interface IndexedPoolState {
   ledger: number;
 }
 
+/**
+ * One entry from the data platform's pool list. A pool without `state` has no
+ * enriched event yet, so it cannot be used for route discovery or quoting.
+ */
+export interface IndexedPoolSummary {
+  contract_id: string;
+  contract_name: string;
+  pool_kind: string;
+  event_count: number;
+  trade_count: number;
+  last_event_at: string | null;
+  state: Omit<IndexedPoolState, 'contract_id' | 'contract_name' | 'pool_kind'> | null;
+}
+
 export interface IndexedLendingPosition {
   account: string;
   contract_id: string;
@@ -139,6 +153,34 @@ export async function fetchIndexedLendingPosition(
   return validatePosition(response.data);
 }
 
+function parsePoolState(data: any): Omit<IndexedPoolState, 'contract_id' | 'contract_name' | 'pool_kind'> | null {
+  const state = data?.state;
+  if (!state || typeof state !== 'object') return null;
+  for (const field of ['reserve_a_raw', 'reserve_b_raw', 'total_shares_raw'] as const) {
+    rawInteger(state[field], `state.${field}`);
+  }
+  if (typeof state.token_a !== 'string' || typeof state.token_b !== 'string') {
+    throw new DataPlatformError('Pool state is missing token addresses', 502);
+  }
+  return {
+    reserve_a_raw: state.reserve_a_raw,
+    reserve_b_raw: state.reserve_b_raw,
+    total_shares_raw: state.total_shares_raw,
+    token_a: state.token_a,
+    token_b: state.token_b,
+    fee_bps:
+      typeof state.fee_bps === 'number' && Number.isInteger(state.fee_bps)
+        ? state.fee_bps
+        : null,
+    amplification:
+      state.amplification === null || state.amplification === undefined
+        ? null
+        : rawInteger(state.amplification, 'state.amplification'),
+    observed_at: String(state.observed_at || ''),
+    ledger: Number(state.ledger || 0),
+  };
+}
+
 export async function fetchIndexedPoolState(
   contractId: string,
   options: { baseUrl?: string; apiKey?: string; timeoutMs?: number } = {}
@@ -171,39 +213,73 @@ export async function fetchIndexedPoolState(
   }
 
   const data = response.data?.data;
-  const state = data?.state;
-  if (!state || typeof state !== 'object') {
+  const state = parsePoolState(data);
+  if (!state) {
     throw new DataPlatformError(
       'Pool has no enriched state; redeploy the pool with reserve/token events',
       503
     );
   }
-  for (const field of ['reserve_a_raw', 'reserve_b_raw', 'total_shares_raw'] as const) {
-    rawInteger(state[field], `state.${field}`);
-  }
-  if (typeof state.token_a !== 'string' || typeof state.token_b !== 'string') {
-    throw new DataPlatformError('Pool state is missing token addresses', 502);
-  }
   return {
     contract_id: String(data.contract_id || contractId),
     contract_name: String(data.contract_name || ''),
     pool_kind: String(data.pool_kind || ''),
-    reserve_a_raw: state.reserve_a_raw,
-    reserve_b_raw: state.reserve_b_raw,
-    total_shares_raw: state.total_shares_raw,
-    token_a: state.token_a,
-    token_b: state.token_b,
-    fee_bps:
-      typeof state.fee_bps === 'number' && Number.isInteger(state.fee_bps)
-        ? state.fee_bps
-        : null,
-    amplification:
-      state.amplification === null || state.amplification === undefined
-        ? null
-        : rawInteger(state.amplification, 'state.amplification'),
-    observed_at: String(state.observed_at || ''),
-    ledger: Number(state.ledger || 0),
+    ...state,
   };
+}
+
+/**
+ * List indexed pools, including the enriched state needed for route discovery.
+ * Pools without enriched state are returned with `state: null` rather than
+ * being dropped or filled with guessed reserves.
+ */
+export async function fetchIndexedPools(
+  options: { baseUrl?: string; apiKey?: string; timeoutMs?: number; limit?: number } = {}
+): Promise<IndexedPoolSummary[]> {
+  const baseUrl = options.baseUrl ?? config.dataPlatformUrl;
+  const apiKey = options.apiKey ?? config.dataPlatformApiKey;
+  if (!baseUrl) {
+    throw new DataPlatformError(
+      'DATA_PLATFORM_URL is not configured; indexed route discovery is unavailable',
+      503
+    );
+  }
+
+  const limit = Math.min(1_000, Math.max(1, options.limit ?? 1_000));
+  const url = `${baseUrl.replace(/\/$/, '')}/financial/pools?limit=${limit}`;
+  const response = await axios.get(url, {
+    timeout: options.timeoutMs ?? 5_000,
+    validateStatus: () => true,
+    headers: apiKey ? { 'x-api-key': apiKey } : undefined,
+  });
+  if (response.status !== 200) {
+    throw new DataPlatformError(
+      `Data platform returned ${response.status} for the pool list`,
+      503
+    );
+  }
+
+  const data = response.data?.data;
+  if (!Array.isArray(data)) {
+    throw new DataPlatformError('Malformed data-platform pool list', 502);
+  }
+  return data.map((entry: any) => {
+    if (!entry || typeof entry.contract_id !== 'string') {
+      throw new DataPlatformError('Malformed pool entry in data-platform response', 502);
+    }
+    return {
+      contract_id: entry.contract_id,
+      contract_name: String(entry.contract_name || ''),
+      pool_kind: String(entry.pool_kind || ''),
+      event_count: Number(entry.event_count || 0),
+      trade_count: Number(entry.trade_count || 0),
+      last_event_at:
+        entry.last_event_at === null || entry.last_event_at === undefined
+          ? null
+          : String(entry.last_event_at),
+      state: parsePoolState(entry),
+    };
+  });
 }
 
 /**

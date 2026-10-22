@@ -114,6 +114,18 @@ export const config = {
   dataPlatformUrl: process.env.DATA_PLATFORM_URL || '',
   dataPlatformApiKey: process.env.DATA_PLATFORM_API_KEY || '',
 
+  // On-chain quote simulation. Disabled unless a funded/existing source account
+  // is configured; simulation never signs or submits a transaction.
+  quoteSimulationRpcUrl:
+    process.env.QUOTE_SIMULATION_RPC_URL ||
+    process.env.ORACLE_RPC_URL ||
+    'https://rpc.testnet.minepi.com',
+  quoteSimulationNetworkPassphrase:
+    process.env.QUOTE_SIMULATION_NETWORK_PASSPHRASE ||
+    process.env.ORACLE_NETWORK_PASSPHRASE ||
+    'Pi Testnet',
+  quoteSimulationSourceAccount: process.env.QUOTE_SIMULATION_SOURCE_ACCOUNT || '',
+
   // Trust state thresholds
   trustDegradedConfidence: parseFloat(process.env.TRUST_DEGRADED_CONFIDENCE || '0.5'),
   trustMinSourceRatio: parseFloat(process.env.TRUST_MIN_SOURCE_RATIO || '0.5'),
